@@ -320,7 +320,8 @@ class KiroAuthManager:
         For Enterprise Kiro IDE:
         - clientIdHash: Hash of client ID (Enterprise Kiro IDE)
         - When clientIdHash is present, automatically loads clientId and clientSecret
-          from ~/.aws/sso/cache/{clientIdHash}.json (device registration file)
+          from the same directory as the credentials file, or falls back to
+          ~/.aws/sso/cache/{clientIdHash}.json (device registration file)
         
         Args:
             file_path: Path to JSON file
@@ -352,7 +353,7 @@ class KiroAuthManager:
             # Load clientIdHash and device registration for Enterprise Kiro IDE
             if 'clientIdHash' in data:
                 self._client_id_hash = data['clientIdHash']
-                self._load_enterprise_device_registration(self._client_id_hash)
+                self._load_enterprise_device_registration(self._client_id_hash, creds_dir=path.parent)
             
             # Load AWS SSO OIDC specific fields (if directly in credentials file)
             if 'clientId' in data:
@@ -377,36 +378,58 @@ class KiroAuthManager:
         except Exception as e:
             logger.error(f"Error loading credentials from file: {e}")
     
-    def _load_enterprise_device_registration(self, client_id_hash: str) -> None:
+    def _load_enterprise_device_registration(self, client_id_hash: str, creds_dir: Optional[Path] = None) -> None:
         """
         Loads clientId and clientSecret from Enterprise Kiro IDE device registration file.
         
         Enterprise Kiro IDE uses AWS SSO OIDC authentication. Device registration is stored at:
-        ~/.aws/sso/cache/{clientIdHash}.json
+        1. Same directory as the credentials file (for multi-account mode)
+        2. ~/.aws/sso/cache/{clientIdHash}.json (fallback for single-account mode)
         
         Args:
             client_id_hash: Client ID hash used to locate the device registration file
+            creds_dir: Directory of the credentials file (optional, for multi-account mode)
         """
-        try:
-            device_reg_path = Path.home() / ".aws" / "sso" / "cache" / f"{client_id_hash}.json"
-            
-            if not device_reg_path.exists():
-                logger.warning(f"Enterprise device registration file not found: {device_reg_path}")
-                return
-            
-            with open(device_reg_path, 'r', encoding='utf-8') as f:
-                device_data = json.load(f)
-            
-            if 'clientId' in device_data:
-                self._client_id = device_data['clientId']
-            
-            if 'clientSecret' in device_data:
-                self._client_secret = device_data['clientSecret']
-            
-            logger.info(f"Enterprise device registration loaded from {device_reg_path}")
-            
-        except Exception as e:
-            logger.error(f"Error loading enterprise device registration: {e}")
+        # Skip if client_id and client_secret were already provided (e.g., from account_pool)
+        if self._client_id and self._client_secret:
+            logger.debug(
+                "Enterprise device registration skipped: clientId/clientSecret already set"
+            )
+            return
+        
+        device_reg_filename = f"{client_id_hash}.json"
+        
+        # Search paths: credentials directory first, then default SSO cache
+        search_paths = []
+        if creds_dir:
+            search_paths.append(creds_dir / device_reg_filename)
+        search_paths.append(Path.home() / ".aws" / "sso" / "cache" / device_reg_filename)
+        
+        for device_reg_path in search_paths:
+            if device_reg_path.exists():
+                try:
+                    with open(device_reg_path, 'r', encoding='utf-8') as f:
+                        device_data = json.load(f)
+                    
+                    if 'clientId' in device_data:
+                        self._client_id = device_data['clientId']
+                    
+                    if 'clientSecret' in device_data:
+                        self._client_secret = device_data['clientSecret']
+                    
+                    logger.info(f"Enterprise device registration loaded from {device_reg_path}")
+                    return
+                    
+                except Exception as e:
+                    logger.error(f"Error loading enterprise device registration from {device_reg_path}: {e}")
+                    continue
+        
+        # None of the search paths had the file
+        searched = ", ".join(str(p) for p in search_paths)
+        logger.warning(
+            f"Enterprise device registration file not found. "
+            f"Searched: {searched}"
+        )
     
     def _save_credentials_to_file(self) -> None:
         """

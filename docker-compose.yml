@@ -1,5 +1,7 @@
-version: '3.8'
-
+# docker compose up --build -d
+# docker compose up -d
+# docker compose down
+# docker compose restart
 services:
   kiro-gateway:
     build:
@@ -35,6 +37,13 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEBUG_MODE=${DEBUG_MODE:-off}
       
+      # Multi-account pool (queue mode, prevents 429 rate limiting)
+      # Set KIRO_MULTI_CREDS_DIR to a directory containing account subdirectories
+      # Each account processes requests serially; concurrency = number of accounts
+      - KIRO_MULTI_CREDS_DIR=${KIRO_MULTI_CREDS_DIR:-}
+      - QUEUE_TIMEOUT=${QUEUE_TIMEOUT:-300}
+      - COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-300}
+      
       # VPN/Proxy settings (for restricted networks)
       - VPN_PROXY_URL=${VPN_PROXY_URL:-}
     
@@ -45,11 +54,15 @@ services:
     volumes:
       # Mount credentials file (if using KIRO_CREDS_FILE)
       # Uncomment and adjust path as needed:
-      # - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro
+      # - ./sso:/home/kiro/.aws/sso/cache
       
       # Mount kiro-cli database (if using KIRO_CLI_DB_FILE)
       # Uncomment and adjust path as needed:
-      # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli:ro
+      # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli
+      
+      # Mount multi-account credentials directory (if using KIRO_MULTI_CREDS_DIR)
+      # Uncomment and adjust path as needed:
+      - ./kiro-accounts:/home/kiro/.kiro-accounts
       
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs

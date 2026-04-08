@@ -93,6 +93,7 @@ class KiroHttpClient:
         self._shared_client = shared_client
         self._owns_client = shared_client is None
         self.client: Optional[httpx.AsyncClient] = shared_client
+        self.encountered_429: bool = False
     
     async def _get_client(self, stream: bool = False) -> httpx.AsyncClient:
         """
@@ -233,6 +234,7 @@ class KiroHttpClient:
                 
                 # 429 - rate limit, wait and retry
                 if response.status_code == 429:
+                    self.encountered_429 = True
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
                     logger.warning(f"Received 429, waiting {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     await asyncio.sleep(delay)

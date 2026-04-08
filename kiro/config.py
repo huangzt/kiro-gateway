@@ -121,6 +121,46 @@ PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "my-super-secret-password-123")
 VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 
 # ==================================================================================================
+# Multi-Account Configuration
+# ==================================================================================================
+
+# Directory containing multiple Kiro account credential subdirectories.
+# Each subdirectory should contain:
+#   sso/kiro-auth-token.json  (required)
+#   sso/{clientIdHash}.json   (optional, for Enterprise Kiro IDE)
+#
+# When set, this takes priority over KIRO_CREDS_FILE.
+# Concurrency = number of valid account directories.
+# Each account is serialized (one request at a time) to avoid 429 rate limiting.
+#
+# Example directory structure:
+#   ~/.kiro-accounts/
+#     account-1/
+#       sso/
+#         kiro-auth-token.json
+#         e909a0580879b06ece1202964fbe9dda95ea4ce3.json
+#     account-2/
+#       sso/
+#         kiro-auth-token.json
+#
+# Set to empty string to disable multi-account mode (default).
+_raw_multi_creds_dir = _get_raw_env_value("KIRO_MULTI_CREDS_DIR") or os.getenv("KIRO_MULTI_CREDS_DIR", "")
+KIRO_MULTI_CREDS_DIR: str = str(Path(_raw_multi_creds_dir)) if _raw_multi_creds_dir else ""
+
+# Queue timeout in seconds for acquiring an account slot.
+# When all accounts are busy, incoming requests wait in a FIFO queue.
+# If no account becomes available within this timeout, a 429 error is returned.
+# Default: 300 seconds (5 minutes)
+QUEUE_TIMEOUT: float = float(os.getenv("QUEUE_TIMEOUT", "300"))
+
+# Cooldown period in seconds for accounts that hit 429 rate limiting.
+# When an account receives a 429 response from Kiro API, it is temporarily
+# removed from the pool and reinserted after this cooldown period.
+# Set to 0 to disable cooldown (not recommended).
+# Default: 300 seconds (5 minutes)
+COOLDOWN_SECONDS: float = float(os.getenv("COOLDOWN_SECONDS", "300"))
+
+# ==================================================================================================
 # Kiro API Credentials
 # ==================================================================================================
 

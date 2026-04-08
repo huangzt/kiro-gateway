@@ -61,6 +61,8 @@ from kiro.config import (
     REGION,
     KIRO_CREDS_FILE,
     KIRO_CLI_DB_FILE,
+    KIRO_MULTI_CREDS_DIR,
+    QUEUE_TIMEOUT,
     PROXY_API_KEY,
     LOG_LEVEL,
     SERVER_HOST,
@@ -78,6 +80,7 @@ from kiro.config import (
 from kiro.auth import KiroAuthManager
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
+from kiro.account_pool import AccountPool
 from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
@@ -216,6 +219,22 @@ def validate_configuration() -> None:
     # Check if .env file exists (optional - can use environment variables)
     env_file = Path(".env")
     
+    # Check for multi-account directory first (highest priority)
+    has_multi_creds = bool(KIRO_MULTI_CREDS_DIR)
+    if KIRO_MULTI_CREDS_DIR:
+        multi_path = Path(KIRO_MULTI_CREDS_DIR).expanduser()
+        if not multi_path.exists():
+            has_multi_creds = False
+            logger.warning(f"KIRO_MULTI_CREDS_DIR not found: {KIRO_MULTI_CREDS_DIR}")
+        elif not multi_path.is_dir():
+            has_multi_creds = False
+            logger.warning(f"KIRO_MULTI_CREDS_DIR is not a directory: {KIRO_MULTI_CREDS_DIR}")
+    
+    # If multi-account is configured and valid, skip single-account checks
+    if has_multi_creds:
+        logger.info(f"Multi-account mode: using credentials from {KIRO_MULTI_CREDS_DIR}")
+        return
+    
     # Check for credentials (from .env or environment variables)
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE)
@@ -335,14 +354,38 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Shared HTTP client created with connection pooling")
     
-    # Create AuthManager
-    # Priority: SQLite DB > JSON file > environment variables
-    app.state.auth_manager = KiroAuthManager(
-        refresh_token=REFRESH_TOKEN,
-        profile_arn=PROFILE_ARN,
-        region=REGION,
-        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
-        sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
+    # ==========================================================================
+    # AccountPool Initialization (Multi-account / Queue mode)
+    # ==========================================================================
+    if KIRO_MULTI_CREDS_DIR:
+        # Multi-account mode: load accounts from directory
+        logger.info(f"Multi-account mode: loading from {KIRO_MULTI_CREDS_DIR}")
+        account_pool = AccountPool.from_directory(
+            directory=KIRO_MULTI_CREDS_DIR,
+            profile_arn=PROFILE_ARN,
+            region=REGION,
+        )
+    else:
+        # Single-account mode: create pool with one account
+        # Priority: SQLite DB > JSON file > environment variables
+        auth_manager = KiroAuthManager(
+            refresh_token=REFRESH_TOKEN,
+            profile_arn=PROFILE_ARN,
+            region=REGION,
+            creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
+            sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
+        )
+        account_pool = AccountPool.from_single(auth_manager)
+    
+    app.state.account_pool = account_pool
+    
+    # For backward compatibility, expose the first auth_manager as app.state.auth_manager
+    # This is used by /v1/models endpoint and other places that need a single auth_manager
+    app.state.auth_manager = account_pool.slots[0].auth_manager
+    
+    logger.info(
+        f"Account pool ready: {account_pool.size} account(s), "
+        f"queue timeout={QUEUE_TIMEOUT}s"
     )
     
     # Create model cache
@@ -351,19 +394,21 @@ async def lifespan(app: FastAPI):
     # BLOCKING: Load models from Kiro API at startup
     # This ensures the cache is populated BEFORE accepting any requests.
     # No race conditions - requests only start after yield.
+    # Use the first account to fetch models (all accounts should see the same models)
     logger.info("Loading models from Kiro API...")
     try:
-        token = await app.state.auth_manager.get_access_token()
+        first_auth = app.state.auth_manager
+        token = await first_auth.get_access_token()
         from kiro.utils import get_kiro_headers
         from kiro.auth import AuthType
-        headers = get_kiro_headers(app.state.auth_manager, token)
+        headers = get_kiro_headers(first_auth, token)
         
         # Build params - profileArn is only needed for Kiro Desktop auth
         params = {"origin": "AI_EDITOR"}
-        if app.state.auth_manager.auth_type == AuthType.KIRO_DESKTOP and app.state.auth_manager.profile_arn:
-            params["profileArn"] = app.state.auth_manager.profile_arn
+        if first_auth.auth_type == AuthType.KIRO_DESKTOP and first_auth.profile_arn:
+            params["profileArn"] = first_auth.profile_arn
         
-        list_models_url = f"{app.state.auth_manager.q_host}/ListAvailableModels"
+        list_models_url = f"{first_auth.q_host}/ListAvailableModels"
         logger.debug(f"Fetching models from: {list_models_url}")
         
         async with httpx.AsyncClient(timeout=30) as client:

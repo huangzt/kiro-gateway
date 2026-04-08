@@ -60,6 +60,7 @@ Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 | 🔄 **Retry Logic** | Automatic retries on errors (403, 429, 5xx) |
 | 📋 **Extended model list** | Including versioned models |
 | 🔐 **Smart token management** | Automatic refresh before expiration |
+| 🔀 **Multi-Account Pool** | Queue-based request management to avoid 429 rate limiting |
 
 ---
 
@@ -236,6 +237,60 @@ Both key formats are supported for compatibility with different kiro-cli version
 
 </details>
 
+### Option 5: Multi-Account Pool (Queue Mode)
+
+Use multiple Kiro accounts to increase throughput and prevent 429 rate limiting errors. Each account processes requests serially, and concurrency equals the number of valid accounts.
+
+```env
+# Directory with multiple account credential directories
+KIRO_MULTI_CREDS_DIR="~/.kiro-accounts"
+
+# Queue wait timeout (seconds, default: 300)
+QUEUE_TIMEOUT=300
+
+# Password to protect YOUR proxy server
+PROXY_API_KEY="my-super-secret-password-123"
+```
+
+<details>
+<summary>📁 Directory structure</summary>
+
+Each account has its own subdirectory under `KIRO_MULTI_CREDS_DIR`, following the same file structure as a single account:
+
+```
+~/.kiro-accounts/
+├── account-1/
+│   ├── kiro-auth-token.json
+│   └── e909a0580879b06e....json  (optional, for Enterprise SSO)
+├── account-2/
+│   └── kiro-auth-token.json
+└── account-3/
+    └── kiro-auth-token.json
+```
+
+Each `kiro-auth-token.json` file uses the same format as `KIRO_CREDS_FILE` (see [Option 1](#option-1-json-credentials-file-kiro-ide--enterprise)).
+
+> **Note:** When `KIRO_MULTI_CREDS_DIR` is set, other auth options (`KIRO_CREDS_FILE`, `REFRESH_TOKEN`, `KIRO_CLI_DB_FILE`) are ignored.
+
+</details>
+
+<details>
+<summary>⚙️ How it works</summary>
+
+- **Request Queue:** Incoming requests are placed in a FIFO queue.
+- **Serial Execution:** Each account processes only one request at a time, preventing 429 errors.
+- **Fair Scheduling:** Accounts are distributed in round-robin fashion.
+- **Timeout:** If all accounts are busy and a request waits longer than `QUEUE_TIMEOUT` (default 5 minutes), a 429 error is returned.
+- **Backward Compatible:** If `KIRO_MULTI_CREDS_DIR` is not set, the gateway uses the single-account mode with the same queue protection (concurrency=1).
+
+| Accounts | Max Concurrent Requests | Behavior |
+|----------|------------------------|----------|
+| 1 (single mode) | 1 | All requests serialize |
+| 2 | 2 | Two requests can run in parallel |
+| N | N | N requests run in parallel |
+
+</details>
+
 ### Getting Credentials
 
 **For Kiro IDE users:**
@@ -336,12 +391,16 @@ Edit `docker-compose.yml` and uncomment volume mounts for your OS:
 ```yaml
 volumes:
   # Kiro IDE credentials (choose your OS)
-  - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro              # Linux/macOS
-  # - ${USERPROFILE}/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro  # Windows
+  - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache              # Linux/macOS
+  # - ${USERPROFILE}/.aws/sso/cache:/home/kiro/.aws/sso/cache  # Windows
   
   # kiro-cli database (choose your OS)
-  - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli:ro  # Linux/macOS
-  # - ${USERPROFILE}/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli:ro  # Windows
+  - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Linux/macOS
+  # - ${USERPROFILE}/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Windows
+  
+  # Multi-account credentials directory (choose your OS)
+  # - ~/.kiro-accounts:/home/kiro/.kiro-accounts              # Linux/macOS
+  # - ${USERPROFILE}/.kiro-accounts:/home/kiro/.kiro-accounts  # Windows
   
   # Debug logs (optional)
   - ./debug_logs:/app/debug_logs
