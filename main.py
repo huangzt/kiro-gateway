@@ -75,6 +75,7 @@ from kiro.config import (
     HIDDEN_FROM_LIST,
     FALLBACK_MODELS,
     VPN_PROXY_URL,
+    QUOTA_CHECK_INTERVAL,
     _warn_timeout_configuration,
 )
 from kiro.auth import KiroAuthManager
@@ -365,6 +366,7 @@ async def lifespan(app: FastAPI):
             profile_arn=PROFILE_ARN,
             region=REGION,
         )
+        account_pool._quota_check_interval = QUOTA_CHECK_INTERVAL
     else:
         # Single-account mode: create pool with one account
         # Priority: SQLite DB > JSON file > environment variables
@@ -385,8 +387,20 @@ async def lifespan(app: FastAPI):
     
     logger.info(
         f"Account pool ready: {account_pool.size} account(s), "
-        f"queue timeout={QUEUE_TIMEOUT}s"
+        f"queue timeout={QUEUE_TIMEOUT}s, "
+        f"quota check interval={QUOTA_CHECK_INTERVAL}s"
     )
+    
+    # ==========================================================================
+    # Quota Initialization (proactive quota check at startup)
+    # ==========================================================================
+    if QUOTA_CHECK_INTERVAL > 0:
+        try:
+            await account_pool.initialize_quota()
+        except Exception as e:
+            logger.warning(f"Quota initialization failed (non-fatal): {e}")
+    else:
+        logger.info("Quota checking disabled (QUOTA_CHECK_INTERVAL=0)")
     
     # Create model cache
     app.state.model_cache = ModelInfoCache()

@@ -5,6 +5,7 @@ httpx
 loguru
 python-dotenv
 tiktoken
+cbor2
 
 # Testing dependencies
 pytest

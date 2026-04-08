@@ -160,6 +160,14 @@ QUEUE_TIMEOUT: float = float(os.getenv("QUEUE_TIMEOUT", "300"))
 # Default: 300 seconds (5 minutes)
 COOLDOWN_SECONDS: float = float(os.getenv("COOLDOWN_SECONDS", "300"))
 
+# Interval in seconds between quota checks per account.
+# Before each request, the gateway checks if the account's quota info is stale
+# (older than this interval). If so, it queries the Kiro Web Portal API to get
+# the latest usage info. Accounts with exhausted quota are automatically disabled.
+# Set to 0 to disable quota checking entirely.
+# Default: 300 seconds (5 minutes)
+QUOTA_CHECK_INTERVAL: float = float(os.getenv("QUOTA_CHECK_INTERVAL", "300"))
+
 # ==================================================================================================
 # Kiro API Credentials
 # ==================================================================================================

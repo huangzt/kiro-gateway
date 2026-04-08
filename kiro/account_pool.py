@@ -49,11 +49,12 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from loguru import logger
 
 from kiro.auth import KiroAuthManager
+from kiro.quota_checker import QuotaInfo, check_quota, QuotaCheckError
 
 
 @dataclass
@@ -72,6 +73,8 @@ class AccountSlot:
         active_requests: Counter of currently active requests (for monitoring)
         total_requests: Counter of total requests served (for monitoring)
         cooldown_until: Unix timestamp when cooldown expires (0 = not cooling)
+        is_exhausted: Whether this account's quota is used up
+        quota_info: Latest quota info from Kiro Web Portal API
     """
 
     name: str
@@ -80,6 +83,8 @@ class AccountSlot:
     active_requests: int = 0
     total_requests: int = 0
     cooldown_until: float = 0.0
+    is_exhausted: bool = False
+    quota_info: Optional[QuotaInfo] = None
 
     @property
     def is_cooling_down(self) -> bool:
@@ -92,12 +97,26 @@ class AccountSlot:
         remaining = self.cooldown_until - time.monotonic()
         return max(0.0, remaining)
 
+    @property
+    def email(self) -> str:
+        """Account email from quota info, or empty string if unknown."""
+        return self.quota_info.email if self.quota_info else ""
+
+    @property
+    def quota_summary(self) -> str:
+        """Human-readable quota summary like '3.5 / 550' or 'unknown'."""
+        if self.quota_info:
+            return self.quota_info.usage_summary
+        return "unknown"
+
     def __repr__(self) -> str:
         cooldown_str = f", cooldown={self.cooldown_remaining:.0f}s" if self.is_cooling_down else ""
+        exhausted_str = ", EXHAUSTED" if self.is_exhausted else ""
+        quota_str = f", quota={self.quota_summary}" if self.quota_info else ""
         return (
             f"AccountSlot(name={self.name!r}, "
             f"active={self.active_requests}, "
-            f"total={self.total_requests}{cooldown_str})"
+            f"total={self.total_requests}{quota_str}{cooldown_str}{exhausted_str})"
         )
 
 
@@ -118,12 +137,14 @@ class AccountPool:
         size: Number of accounts in the pool
     """
 
-    def __init__(self, slots: List[AccountSlot]) -> None:
+    def __init__(self, slots: List[AccountSlot], quota_check_interval: float = 300.0) -> None:
         """
         Initialize account pool with given slots.
 
         Args:
             slots: List of AccountSlot instances
+            quota_check_interval: Seconds between quota checks per account.
+                                  Default is 300 (5 minutes). Set to 0 to disable.
 
         Raises:
             ValueError: If slots list is empty
@@ -133,6 +154,7 @@ class AccountPool:
 
         self._slots = slots
         self._queue: asyncio.Queue[AccountSlot] = asyncio.Queue()
+        self._quota_check_interval = quota_check_interval
 
         # Pre-populate queue with all available slots
         for slot in self._slots:
@@ -140,7 +162,8 @@ class AccountPool:
 
         logger.info(
             f"AccountPool initialized: {len(self._slots)} account(s), "
-            f"max concurrency={len(self._slots)}"
+            f"max concurrency={len(self._slots)}, "
+            f"quota_check_interval={quota_check_interval:.0f}s"
         )
         for slot in self._slots:
             logger.debug(f"  Account slot: {slot.name}")
@@ -163,7 +186,15 @@ class AccountPool:
     @property
     def busy_count(self) -> int:
         """Number of currently busy account slots."""
-        return self.size - self.available_count
+        # Busy = Total - Available - CoolingDown - Exhausted
+        # But qsize() only includes idle slots.
+        # So Busy = slots that have active_requests > 0
+        return sum(1 for slot in self._slots if slot.active_requests > 0)
+
+    @property
+    def exhausted_count(self) -> int:
+        """Number of accounts that have reached their quota."""
+        return sum(1 for slot in self._slots if slot.is_exhausted)
 
     async def acquire(self, timeout: float = 300.0) -> AccountSlot:
         """
@@ -171,6 +202,9 @@ class AccountPool:
 
         Blocks until a slot becomes available or timeout is reached.
         Uses FIFO queue for fair scheduling across accounts.
+        Before returning, checks if the slot's quota needs refreshing
+        (based on quota_check_interval). If quota is exhausted, the slot
+        is discarded and the next available slot is tried.
 
         Args:
             timeout: Maximum seconds to wait for an available slot.
@@ -188,30 +222,163 @@ class AccountPool:
             f"queue_waiting={self._queue.qsize()})"
         )
 
-        try:
-            slot = await asyncio.wait_for(self._queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Queue timeout after {timeout}s - all {self.size} account(s) busy"
+        deadline = time.monotonic() + timeout
+
+        while True:
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                logger.warning(
+                    f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
+                )
+                raise asyncio.TimeoutError()
+
+            try:
+                slot = await asyncio.wait_for(
+                    self._queue.get(), timeout=remaining_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
+                )
+                raise
+
+            # Check quota if interval has elapsed
+            if self._quota_check_interval > 0:
+                await self._maybe_refresh_quota(slot)
+
+            # If slot became exhausted after quota check, skip it
+            if slot.is_exhausted:
+                logger.warning(
+                    f"Skipping exhausted account '{slot.name}' "
+                    f"({slot.email}, quota: {slot.quota_summary})"
+                )
+                # Don't put it back - it's permanently out
+                continue
+
+            # Slot is good, mark as active
+            slot.active_requests += 1
+            slot.total_requests += 1
+
+            # Build info log with email and quota
+            email_str = f" ({slot.email})" if slot.email else ""
+            quota_str = f", quota: {slot.quota_summary}" if slot.quota_info else ""
+
+            logger.info(
+                f"Account acquired: {slot.name}{email_str} "
+                f"(active={slot.active_requests}, total={slot.total_requests}{quota_str})"
             )
-            raise
 
-        slot.active_requests += 1
-        slot.total_requests += 1
+            return slot
 
+    async def _maybe_refresh_quota(self, slot: AccountSlot) -> None:
+        """
+        Refresh quota info for a slot if the cached info is stale.
+
+        Args:
+            slot: The AccountSlot to check
+        """
+        # Skip if quota check is disabled
+        if self._quota_check_interval <= 0:
+            return
+
+        # Skip if quota was checked recently
+        if slot.quota_info and slot.quota_info.age_seconds() < self._quota_check_interval:
+            return
+
+        # Refresh quota
+        await self._check_slot_quota(slot)
+
+    async def _check_slot_quota(self, slot: AccountSlot) -> None:
+        """
+        Query Kiro Web Portal API for the slot's current quota.
+
+        On success, updates slot.quota_info and may set slot.is_exhausted.
+        On failure, logs a warning but does NOT mark the slot as exhausted
+        (fail-open: if we can't check, we let the request through).
+
+        Args:
+            slot: The AccountSlot to check quota for
+        """
+        try:
+            access_token = await slot.auth_manager.get_access_token()
+            provider = getattr(slot.auth_manager, '_provider', 'BuilderId')
+            quota = await check_quota(access_token, provider)
+            slot.quota_info = quota
+
+            if quota.is_exhausted:
+                slot.is_exhausted = True
+                logger.error(
+                    f"Account '{slot.name}' ({quota.email}) is EXHAUSTED "
+                    f"(quota: {quota.usage_summary}, plan: {quota.subscription_plan}). "
+                    f"Removed from active pool."
+                )
+            else:
+                logger.info(
+                    f"Quota check: {slot.name} ({quota.email}) "
+                    f"quota: {quota.usage_summary}, "
+                    f"plan: {quota.subscription_plan}, "
+                    f"next reset: {quota.next_reset}"
+                )
+        except QuotaCheckError as e:
+            logger.warning(f"Quota check failed for '{slot.name}': {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error checking quota for '{slot.name}': {e}")
+
+    async def initialize_quota(self) -> None:
+        """
+        Query quota for all accounts during startup.
+
+        This is called once when the server starts to get initial quota info.
+        Accounts that are found to be exhausted are removed from the pool.
+        Failures are logged but don't prevent the server from starting.
+        """
+        logger.info("Checking quota for all accounts...")
+
+        # Check all slots concurrently
+        tasks = [self._check_slot_quota(slot) for slot in self._slots]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Remove exhausted slots from queue
+        # Since we can't remove from asyncio.Queue, we rebuild it
+        exhausted_names = [s.name for s in self._slots if s.is_exhausted]
+        if exhausted_names:
+            # Drain the queue and re-add only non-exhausted slots
+            remaining_slots = []
+            while not self._queue.empty():
+                try:
+                    s = self._queue.get_nowait()
+                    if not s.is_exhausted:
+                        remaining_slots.append(s)
+                except asyncio.QueueEmpty:
+                    break
+            for s in remaining_slots:
+                self._queue.put_nowait(s)
+
+            logger.warning(
+                f"Removed {len(exhausted_names)} exhausted account(s) from pool: "
+                f"{', '.join(exhausted_names)}"
+            )
+
+        active_count = sum(1 for s in self._slots if not s.is_exhausted)
         logger.info(
-            f"Account acquired: {slot.name} "
-            f"(active={slot.active_requests}, total={slot.total_requests})"
+            f"Quota initialization complete: "
+            f"{active_count}/{len(self._slots)} account(s) active"
         )
 
-        return slot
-
-    async def release(self, slot: AccountSlot, cooldown_seconds: float = 0.0) -> None:
+    async def release(
+        self,
+        slot: AccountSlot,
+        cooldown_seconds: float = 0.0,
+        exhausted: bool = False
+    ) -> None:
         """
         Release an account slot back to the pool.
 
         Makes the slot available for the next waiting request.
         Must be called after acquire(), typically in a finally block.
+
+        If exhausted is True, the slot is marked as exhausted and will NOT
+        be returned to the queue, effectively disabling it.
 
         If cooldown_seconds > 0, the slot is put on cooldown and will not
         be available until the cooldown expires. This is used when the
@@ -220,8 +387,19 @@ class AccountPool:
         Args:
             slot: The AccountSlot to release
             cooldown_seconds: Seconds to cool down before reuse (0 = immediate)
+            exhausted: If True, mark account as out of quota and disable it
         """
         slot.active_requests -= 1
+
+        if exhausted:
+            # Account is out of quota - disable it
+            slot.is_exhausted = True
+            logger.error(
+                f"Account '{slot.name}' is EXHAUSTED (quota reached). "
+                f"It has been removed from the active pool."
+            )
+            # We don't put it back in the queue
+            return
 
         if cooldown_seconds > 0:
             # Put slot on cooldown - delayed reinsertion into queue
@@ -272,19 +450,36 @@ class AccountPool:
             - available: Number of idle accounts
             - busy: Number of active accounts
             - cooling_down: Number of accounts in cooldown
-            - accounts: Per-account status details
+            - exhausted: Number of accounts out of quota
+            - accounts: Per-account status details with quota info
         """
         accounts_status = []
         cooling_count = 0
+        exhausted_count = 0
         for slot in self._slots:
             is_cooling = slot.is_cooling_down
             if is_cooling:
                 cooling_count += 1
-            account_info = {
+            if slot.is_exhausted:
+                exhausted_count += 1
+
+            account_info: dict = {
                 "name": slot.name,
+                "email": slot.email or None,
                 "active_requests": slot.active_requests,
                 "total_requests": slot.total_requests,
+                "is_exhausted": slot.is_exhausted,
             }
+            # Quota details
+            if slot.quota_info:
+                account_info["quota"] = {
+                    "used": slot.quota_info.total_used,
+                    "limit": slot.quota_info.total_limit,
+                    "remaining": slot.quota_info.remaining,
+                    "plan": slot.quota_info.subscription_plan,
+                    "next_reset": slot.quota_info.next_reset,
+                    "last_checked_age_seconds": round(slot.quota_info.age_seconds()),
+                }
             if is_cooling:
                 account_info["cooldown_remaining_seconds"] = round(slot.cooldown_remaining)
             accounts_status.append(account_info)
@@ -294,6 +489,7 @@ class AccountPool:
             "available": self.available_count,
             "busy": self.busy_count,
             "cooling_down": cooling_count,
+            "exhausted": exhausted_count,
             "accounts": accounts_status,
         }
 

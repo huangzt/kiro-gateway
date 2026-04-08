@@ -177,6 +177,7 @@ async def messages(
     auth_manager: KiroAuthManager = slot.auth_manager
     model_cache: ModelInfoCache = request.app.state.model_cache
     encountered_429 = False
+    encountered_quota_error = False
     
     try:
         # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
@@ -361,6 +362,11 @@ async def messages(
                     from kiro.kiro_errors import enhance_kiro_error
                     error_info = enhance_kiro_error(error_json)
                     error_message = error_info.user_message
+                    
+                    # Track quota exhausted error
+                    if error_info.reason == "MONTHLY_REQUEST_COUNT":
+                        encountered_quota_error = True
+                        
                     # Log original error for debugging
                     logger.debug(f"Original Kiro error: {error_info.original_message} (reason: {error_info.reason})")
                 except (json.JSONDecodeError, KeyError):
@@ -501,4 +507,8 @@ async def messages(
         # Release account slot (only if not transferred to stream_wrapper)
         if slot is not None:
             cooldown = COOLDOWN_SECONDS if encountered_429 else 0.0
-            await account_pool.release(slot, cooldown_seconds=cooldown)
+            await account_pool.release(
+                slot, 
+                cooldown_seconds=cooldown,
+                exhausted=encountered_quota_error
+            )
