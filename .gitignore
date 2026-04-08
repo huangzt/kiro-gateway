@@ -24,8 +24,14 @@ debug*.json
 # Project-specific
 _notes/
 requests/
+sso/
+.claude/
 
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
+sso/.DS_Store
+sso/e909a0580879b06ece1202964fbe9dda95ea4ce3.json
+sso/kiro-auth-token.json
+.claude/settings.local.json

@@ -746,3 +746,20 @@ This project is not affiliated with, endorsed by, or sponsored by Amazon Web Ser
 **[⬆ Back to Top](#-kiro-gateway)**
 
 </div>
+
+---
+
+## 支持的模型
+
+2026-04-07 23:42:10 | INFO     | kiro.cache:update:76 - Updating model cache. Found 9 models.
+
+auto (Auto)
+claude-sonnet-4.5 (Claude Sonnet 4.5)
+claude-sonnet-4 (Claude Sonnet 4)
+claude-haiku-4.5 (Claude Haiku 4.5)
+deepseek-3.2 (Deepseek v3.2)
+minimax-m2.5 (MiniMax M2.5)
+minimax-m2.1 (MiniMax M2.1)
+glm-5 (GLM 5)
+qwen3-coder-next (Qwen3 Coder Next)
+

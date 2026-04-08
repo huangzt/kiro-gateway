@@ -76,6 +76,12 @@ class ModelInfoCache:
             logger.info(f"Updating model cache. Found {len(models_data)} models.")
             self._cache = {model["modelId"]: model for model in models_data}
             self._last_update = time.time()
+            
+            # Log each model being added
+            for model in models_data:
+                model_id = model.get("modelId", "unknown")
+                model_name = model.get("modelName", model_id)
+                logger.info(f"Added model to cache: {model_id} ({model_name})")
     
     def get(self, model_id: str) -> Optional[Dict[str, Any]]:
         """

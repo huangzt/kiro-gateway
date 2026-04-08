@@ -350,10 +350,10 @@ volumes:
 ### 管理命令
 
 ```bash
-docker-compose logs -f      # 查看日志
-docker-compose restart      # 重启
-docker-compose down         # 停止
-docker-compose pull && docker-compose up -d  # 更新
+docker compose logs -f      # 查看日志
+docker compose restart      # 重启
+docker compose down         # 停止
+docker compose up --build -d  # 更新
 ```
 
 <details>
