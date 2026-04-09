@@ -70,23 +70,23 @@ services:
     restart: unless-stopped
     
     # Health check
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 5s
     
     # Resource limits (recommended for production)
     # Adjust based on your workload and available resources
-    deploy:
-      resources:
-        limits:
-          cpus: '2'        # Maximum CPU cores (streaming can be CPU-intensive)
-          memory: 1G       # Maximum memory (sufficient for FastAPI + streaming)
-        reservations:
-          cpus: '0.5'      # Minimum guaranteed CPU
-          memory: 256M     # Minimum guaranteed memory
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'        # Maximum CPU cores (streaming can be CPU-intensive)
+    #       memory: 1G       # Maximum memory (sufficient for FastAPI + streaming)
+    #     reservations:
+    #       cpus: '0.5'      # Minimum guaranteed CPU
+    #       memory: 256M     # Minimum guaranteed memory
 
 networks:
   default:
