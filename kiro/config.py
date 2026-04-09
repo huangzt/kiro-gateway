@@ -76,6 +76,35 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
     
     return None
 
+  # --- Dynamic Getters for Hot-Reloadable Config ---
+
+def is_fake_reasoning_enabled() -> bool:
+    """Check if fake reasoning is enabled (prioritizes gateway.yml)."""
+    from kiro.admin_config import get_admin_config
+    val = get_admin_config().get("reasoning", "fake_reasoning")
+    if val is not None:
+        return bool(val)
+    return FAKE_REASONING_ENABLED
+
+def get_fake_reasoning_max_tokens() -> int:
+    """Get max reasoning tokens (prioritizes gateway.yml)."""
+    from kiro.admin_config import get_admin_config
+    val = get_admin_config().get("reasoning", "fake_reasoning_max_tokens")
+    if val is not None:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            pass
+    return FAKE_REASONING_MAX_TOKENS
+
+def get_fake_reasoning_handling() -> str:
+    """Get reasoning handling mode (prioritizes gateway.yml)."""
+    from kiro.admin_config import get_admin_config
+    val = get_admin_config().get("reasoning", "fake_reasoning_handling")
+    if val is not None:
+        return str(val)
+    return FAKE_REASONING_HANDLING
+
 # ==================================================================================================
 # Server Settings
 # ==================================================================================================
@@ -146,6 +175,22 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 # Set to empty string to disable multi-account mode (default).
 _raw_multi_creds_dir = _get_raw_env_value("KIRO_MULTI_CREDS_DIR") or os.getenv("KIRO_MULTI_CREDS_DIR", "")
 KIRO_MULTI_CREDS_DIR: str = str(Path(_raw_multi_creds_dir)) if _raw_multi_creds_dir else ""
+
+# Directory containing the host's AWS SSO cache.
+# This directory should be mapped from the host to the container via docker-compose.
+# When set, the gateway can detect which account is currently active on the host
+# and provide a "Switch" button to swap between accounts by copying files.
+#
+# Common host paths:
+#   - macOS/Linux: ~/.aws/sso/cache
+#   - Windows: %USERPROFILE%\.aws\sso\cache
+#
+# Example mapping in docker-compose.yml:
+#   volumes:
+#     - ~/.aws/sso/cache:/app/host_aws_cache:rw
+#
+_raw_host_cache_dir = _get_raw_env_value("KIRO_HOST_CACHE_DIR") or os.getenv("KIRO_HOST_CACHE_DIR", "")
+KIRO_HOST_CACHE_DIR: str = str(Path(_raw_host_cache_dir)) if _raw_host_cache_dir else ""
 
 # Queue timeout in seconds for acquiring an account slot.
 # When all accounts are busy, incoming requests wait in a FIFO queue.

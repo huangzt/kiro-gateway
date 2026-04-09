@@ -57,6 +57,23 @@ import yaml
 from loguru import logger
 
 
+# Global instance for easy access from other modules
+_instance: Optional["AdminConfig"] = None
+
+
+def get_admin_config() -> "AdminConfig":
+    """
+    Get the global AdminConfig instance.
+    
+    Returns:
+        The AdminConfig instance (creates a default one if not yet initialized)
+    """
+    global _instance
+    if _instance is None:
+        _instance = AdminConfig()
+    return _instance
+
+
 # Default configuration structure.
 # None means "not set in gateway.yml, fall back to .env / hardcoded default".
 _DEFAULT_CONFIG: Dict[str, Any] = {
@@ -124,6 +141,10 @@ class AdminConfig:
         self._config: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._load_sync()
+        
+        # Set global instance
+        global _instance
+        _instance = self
 
     # ------------------------------------------------------------------
     # Internal helpers

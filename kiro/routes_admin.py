@@ -134,7 +134,7 @@ async def get_status(request: Request) -> JSONResponse:
 async def add_account(
     request: Request,
     auth_token_file: UploadFile = File(..., description="kiro-auth-token.json"),
-    device_reg_file: Optional[UploadFile] = File(None, description="{hash}.json (optional, Enterprise SSO)"),
+    device_reg_file: UploadFile = File(..., description="{hash}.json (Enterprise SSO)"),
 ) -> JSONResponse:
     """
     Add a new account to the pool by uploading credential files.
@@ -146,7 +146,7 @@ async def add_account(
     Args:
         request: FastAPI request
         auth_token_file: Required kiro-auth-token.json upload
-        device_reg_file: Optional {hash}.json for Enterprise SSO
+        device_reg_file: Required {hash}.json for Enterprise SSO
 
     Returns:
         JSON with the new account name and initial status
@@ -495,6 +495,119 @@ async def delete_account(account_name: str, request: Request) -> JSONResponse:
     )
 
 
+@router.get("/accounts/{account_name}/files", dependencies=[Depends(verify_admin_key)])
+async def list_account_files(account_name: str, request: Request) -> JSONResponse:
+    """
+    List downloadable credential files for an account.
+
+    Args:
+        account_name: The account directory name
+        request: FastAPI request
+
+    Returns:
+        List of JSON files found in the account directory
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+    if not multi_dir:
+        raise HTTPException(status_code=400, detail="Multi-account mode not configured")
+
+    account_dir = Path(multi_dir).expanduser().resolve() / account_name
+    if not account_dir.exists():
+        raise HTTPException(status_code=404, detail="Account directory not found")
+
+    files = []
+    for f in account_dir.glob("*.json"):
+        if f.is_file():
+            files.append(f.name)
+
+    return JSONResponse(content={"account": account_name, "files": sorted(files)})
+
+
+@router.get("/accounts/{account_name}/files/{filename}", dependencies=[Depends(verify_admin_key)])
+async def download_account_file(account_name: str, filename: str, request: Request):
+    """
+    Download a specific credential file from an account directory.
+
+    Args:
+        account_name: The account directory name
+        filename: Name of the file to download
+        request: FastAPI request
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+    if not multi_dir:
+        raise HTTPException(status_code=400, detail="Multi-account mode not configured")
+
+    account_dir = Path(multi_dir).expanduser().resolve() / account_name
+    file_path = (account_dir / filename).resolve()
+
+    # Security check: ensure path is within account_dir to prevent directory traversal
+    if not file_path.is_relative_to(account_dir.resolve()):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(
+        str(file_path),
+        filename=filename,
+        media_type="application/json"
+    )
+
+
+@router.post(
+    "/accounts/{account_name}/switch",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def switch_account(account_name: str, request: Request) -> JSONResponse:
+    """
+    Switch the host's active Kiro account to the specified account.
+    
+    This copies the account's credentials to the host cache directory 
+    mapped via KIRO_HOST_CACHE_DIR.
+    
+    Args:
+        account_name: The account directory name
+        request: FastAPI request
+        
+    Returns:
+        Success status
+        
+    Raises:
+        HTTPException: 404 if account not found
+        HTTPException: 400 if KIRO_HOST_CACHE_DIR is not configured
+        HTTPException: 500 if file copy fails
+    """
+    pool: AccountPool = request.app.state.account_pool
+    success = pool.switch_to_account(account_name)
+    
+    if not success:
+        from kiro.config import KIRO_HOST_CACHE_DIR
+        if not KIRO_HOST_CACHE_DIR:
+            raise HTTPException(
+                status_code=400, 
+                detail="KIRO_HOST_CACHE_DIR is not configured in .env. Setup volume mapping first."
+            )
+        
+        slot = pool.get_slot_by_name(account_name)
+        if slot is None:
+            raise HTTPException(status_code=404, detail=f"Account '{account_name}' not found")
+            
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to switch to account '{account_name}'. Check server logs for details."
+        )
+
+    return JSONResponse(
+        content={
+            "success": True, 
+            "account_name": account_name,
+            "message": f"Successfully switched host account to '{account_name}'"
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -535,9 +648,9 @@ async def get_config(request: Request) -> JSONResponse:
             "streaming_read_timeout": getattr(cfg_module, "STREAMING_READ_TIMEOUT", 300),
         },
         "reasoning": {
-            "fake_reasoning": getattr(cfg_module, "FAKE_REASONING_ENABLED", True),
-            "fake_reasoning_max_tokens": getattr(cfg_module, "FAKE_REASONING_MAX_TOKENS", 4000),
-            "fake_reasoning_handling": getattr(cfg_module, "FAKE_REASONING_HANDLING", "as_reasoning_content"),
+            "fake_reasoning": admin_cfg.get("reasoning", "fake_reasoning") if admin_cfg.get("reasoning", "fake_reasoning") is not None else getattr(cfg_module, "FAKE_REASONING_ENABLED", True),
+            "fake_reasoning_max_tokens": admin_cfg.get("reasoning", "fake_reasoning_max_tokens") if admin_cfg.get("reasoning", "fake_reasoning_max_tokens") is not None else getattr(cfg_module, "FAKE_REASONING_MAX_TOKENS", 4000),
+            "fake_reasoning_handling": admin_cfg.get("reasoning", "fake_reasoning_handling") if admin_cfg.get("reasoning", "fake_reasoning_handling") is not None else getattr(cfg_module, "FAKE_REASONING_HANDLING", "as_reasoning_content"),
         },
         "logging": {
             "log_level": getattr(cfg_module, "LOG_LEVEL", "INFO"),

@@ -43,6 +43,9 @@ services:
       - KIRO_MULTI_CREDS_DIR=${KIRO_MULTI_CREDS_DIR:-}
       - QUEUE_TIMEOUT=${QUEUE_TIMEOUT:-300}
       - COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-300}
+
+      # Dynamic account switching (Host mapping)
+      - KIRO_HOST_CACHE_DIR=${KIRO_HOST_CACHE_DIR:-}
       
       # VPN/Proxy settings (for restricted networks)
       - VPN_PROXY_URL=${VPN_PROXY_URL:-}
@@ -70,6 +73,12 @@ services:
       # Mount gateway.yml for hot-reload config persistence (Admin UI)
       # Config changes via Admin UI are persisted here across container restarts
       - ./gateway.yml:/app/gateway.yml
+
+      # Host AWS SSO cache mapping (Required for Admin UI "Switch Account" feature)
+      # Map your host's AWS cache directory to /app/host_aws_cache in container
+      # macOS/Linux: ~/.aws/sso/cache:/app/host_aws_cache:rw
+      # Windows Example: ${USERPROFILE}/.aws/sso/cache:/app/host_aws_cache:rw
+      - ~/.aws/sso/cache:/app/host_aws_cache:rw
     
     restart: unless-stopped
     

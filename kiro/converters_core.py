@@ -38,8 +38,8 @@ from loguru import logger
 
 from kiro.config import (
     TOOL_DESCRIPTION_MAX_LENGTH,
-    FAKE_REASONING_ENABLED,
-    FAKE_REASONING_MAX_TOKENS,
+    is_fake_reasoning_enabled,
+    get_fake_reasoning_max_tokens,
 )
 
 
@@ -280,7 +280,7 @@ def get_thinking_system_prompt_addition() -> str:
     Returns:
         System prompt addition text (empty string if fake reasoning is disabled)
     """
-    if not FAKE_REASONING_ENABLED:
+    if not is_fake_reasoning_enabled():
         return ""
     
     return (
@@ -339,7 +339,7 @@ def inject_thinking_tags(content: str) -> str:
     Returns:
         Content with thinking tags prepended (if enabled) or original content
     """
-    if not FAKE_REASONING_ENABLED:
+    if not is_fake_reasoning_enabled():
         return content
     
     # Thinking instruction to improve reasoning quality
@@ -357,11 +357,11 @@ def inject_thinking_tags(content: str) -> str:
     
     thinking_prefix = (
         f"<thinking_mode>enabled</thinking_mode>\n"
-        f"<max_thinking_length>{FAKE_REASONING_MAX_TOKENS}</max_thinking_length>\n"
+        f"<max_thinking_length>{get_fake_reasoning_max_tokens()}</max_thinking_length>\n"
         f"<thinking_instruction>{thinking_instruction}</thinking_instruction>\n\n"
     )
     
-    logger.debug(f"Injecting fake reasoning tags with max_tokens={FAKE_REASONING_MAX_TOKENS}")
+    logger.debug(f"Injecting fake reasoning tags with max_tokens={get_fake_reasoning_max_tokens()}")
     
     return thinking_prefix + content
 

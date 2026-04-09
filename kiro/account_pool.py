@@ -47,6 +47,7 @@ Usage:
 import asyncio
 import json
 import time
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -55,6 +56,7 @@ from loguru import logger
 
 from kiro.auth import KiroAuthManager
 from kiro.quota_checker import QuotaInfo, check_quota, QuotaCheckError
+from kiro.config import KIRO_HOST_CACHE_DIR
 
 
 @dataclass
@@ -99,6 +101,60 @@ class AccountSlot:
         """Seconds remaining in cooldown (0 if not cooling)."""
         remaining = self.cooldown_until - time.monotonic()
         return max(0.0, remaining)
+
+    @property
+    def is_active_on_host(self) -> bool:
+        """
+        Check if this account's credentials match the files in KIRO_HOST_CACHE_DIR.
+        Compares refreshTokens for better reliability than binary file comparison.
+        """
+        if not KIRO_HOST_CACHE_DIR:
+            return False
+
+        host_dir = Path(KIRO_HOST_CACHE_DIR)
+        if not host_dir.exists():
+            return False
+
+        creds_dir = self.auth_manager.creds_dir
+        if not creds_dir or not creds_dir.exists():
+            return False
+
+        host_token_path = host_dir / "kiro-auth-token.json"
+        account_token_path = creds_dir / "kiro-auth-token.json"
+
+        if not host_token_path.exists() or not account_token_path.exists():
+            return False
+
+        try:
+            with open(host_token_path, "r", encoding="utf-8") as f:
+                host_data = json.load(f)
+            with open(account_token_path, "r", encoding="utf-8") as f:
+                account_data = json.load(f)
+                
+            # Priority 1: Persistent RefreshToken
+            host_rt = host_data.get("refreshToken")
+            acc_rt = account_data.get("refreshToken")
+            if host_rt and acc_rt:
+                return host_rt == acc_rt
+                
+            # Priority 2: Profile ARN (very stable)
+            host_arn = host_data.get("profileArn")
+            acc_arn = account_data.get("profileArn")
+            if host_arn and acc_arn:
+                return host_arn == acc_arn
+
+            # Priority 3: Client ID (SSO)
+            host_cid = host_data.get("clientId")
+            acc_cid = account_data.get("clientId")
+            if host_cid and acc_cid:
+                return host_cid == acc_cid
+
+            # Last Resort: AccessToken or content match
+            return host_data.get("accessToken") == account_data.get("accessToken")
+            
+        except Exception as e:
+            logger.debug(f"Host active check failed for {self.name}: {e}")
+            return False
 
     @property
     def email(self) -> str:
@@ -499,6 +555,7 @@ class AccountPool:
                 "total_requests": slot.total_requests,
                 "is_exhausted": slot.is_exhausted,
                 "is_disabled": slot.is_disabled,
+                "is_active_on_host": slot.is_active_on_host,
             }
             # Quota details
             if slot.quota_info:
@@ -512,6 +569,20 @@ class AccountPool:
                 }
             if is_cooling:
                 account_info["cooldown_remaining_seconds"] = round(slot.cooldown_remaining)
+
+            # Files available for download
+            account_files = []
+            if slot.auth_manager and slot.auth_manager.creds_dir:
+                try:
+                    d = slot.auth_manager.creds_dir
+                    if d.exists():
+                        for f in d.glob("*.json"):
+                            if f.is_file():
+                                account_files.append(f.name)
+                except Exception as e:
+                    logger.debug(f"Failed to list files for account {slot.name}: {e}")
+            account_info["files"] = sorted(account_files)
+
             accounts_status.append(account_info)
 
         return {
@@ -601,6 +672,61 @@ class AccountPool:
         self._slots.remove(slot)
         logger.info(f"Account slot removed: '{name}' (pool size: {self.size})")
         return True
+
+    def switch_to_account(self, name: str) -> bool:
+        """
+        Copy account credentials to the host cache directory.
+        
+        This allows 'switching' the active account on the machine where
+        Kiro IDE/CLI is running, provided the directory mapping is set up correctly.
+        
+        Args:
+            name: Account directory name to switch to
+            
+        Returns:
+            True if switch successful, False otherwise
+        """
+        if not KIRO_HOST_CACHE_DIR:
+            logger.warning("KIRO_HOST_CACHE_DIR not configured, cannot switch account")
+            return False
+
+        slot = self.get_slot_by_name(name)
+        if not slot:
+            logger.error(f"Cannot switch to unknown account: {name}")
+            return False
+
+        creds_dir = slot.auth_manager.creds_dir
+        if not creds_dir or not creds_dir.exists():
+            logger.error(f"Credentials directory not found for account: {name}")
+            return False
+
+        host_dir = Path(KIRO_HOST_CACHE_DIR)
+        if not host_dir.exists():
+            try:
+                host_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to create host cache dir {KIRO_HOST_CACHE_DIR}: {e}")
+                return False
+
+        try:
+            # Copy all .json files from the account directory to host cache
+            copied_count = 0
+            for f in creds_dir.glob("*.json"):
+                if f.is_file():
+                    target = host_dir / f.name
+                    shutil.copy2(str(f), str(target))
+                    copied_count += 1
+            
+            if copied_count > 0:
+                logger.info(f"Successfully switched host account to '{name}' ({copied_count} files copied)")
+                return True
+            else:
+                logger.warning(f"No credentials files found to copy for account: {name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to switch host account to '{name}': {e}")
+            return False
 
     async def disable_slot(self, name: str) -> bool:
         """

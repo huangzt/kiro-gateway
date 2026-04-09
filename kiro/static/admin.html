@@ -63,11 +63,41 @@
     <!-- Dashboard -->
     <div id="pane-dashboard" class="tab-pane active">
       <div class="stats-row">
-        <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="s-total">—</div></div>
-        <div class="stat-card"><div class="stat-label">活跃</div><div class="stat-val green" id="s-active">—</div></div>
-        <div class="stat-card"><div class="stat-label">冷却中</div><div class="stat-val yellow" id="s-cooling">—</div></div>
-        <div class="stat-card"><div class="stat-label">已耗尽</div><div class="stat-val red" id="s-exhausted">—</div></div>
-        <div class="stat-card"><div class="stat-label">已禁用</div><div class="stat-val gray" id="s-disabled">—</div></div>
+        <div class="stat-card st-total">
+          <div class="stat-icon">📁</div>
+          <div class="stat-info">
+            <div class="stat-label">总账号</div>
+            <div class="stat-val" id="s-total">—</div>
+          </div>
+        </div>
+        <div class="stat-card st-active">
+          <div class="stat-icon">⚡</div>
+          <div class="stat-info">
+            <div class="stat-label">活跃 (可用)</div>
+            <div class="stat-val" id="s-active">—</div>
+          </div>
+        </div>
+        <div class="stat-card st-cooling">
+          <div class="stat-icon">⏳</div>
+          <div class="stat-info">
+            <div class="stat-label">冷却中</div>
+            <div class="stat-val" id="s-cooling">—</div>
+          </div>
+        </div>
+        <div class="stat-card st-exhausted">
+          <div class="stat-icon">🚫</div>
+          <div class="stat-info">
+            <div class="stat-label">已耗尽</div>
+            <div class="stat-val" id="s-exhausted">—</div>
+          </div>
+        </div>
+        <div class="stat-card st-disabled">
+          <div class="stat-icon">🔒</div>
+          <div class="stat-info">
+            <div class="stat-label">已禁用</div>
+            <div class="stat-val" id="s-disabled">—</div>
+          </div>
+        </div>
       </div>
       <div class="section-header">
         <div><span class="section-title">账号列表</span><span class="section-sub" id="account-count"></span></div>
@@ -134,6 +164,11 @@
     <button class="modal-close" onclick="closeAddModal()">✕</button>
     <div class="modal-title">添加账号</div>
     <div class="modal-sub">上传凭证文件，自动创建账号目录并热加入账号池</div>
+    <div class="modal-hint">
+      <b>凭证文件位置参考：</b><br>
+      • macOS: <code>~/.aws/sso/cache/</code><br>
+      • Windows: <code>%USERPROFILE%\.aws\sso\cache\</code>
+    </div>
     <div class="field">
       <div class="field-label">kiro-auth-token.json <span style="color:var(--red)">*</span></div>
       <div class="field-drop" id="auth-drop"
@@ -144,7 +179,7 @@
       <input type="file" id="auth-file" accept=".json" style="display:none" onchange="onFileSelect(this,'auth-drop')">
     </div>
     <div class="field">
-      <div class="field-label">{hash}.json <span style="color:var(--text3)">(可选 · Enterprise SSO)</span></div>
+      <div class="field-label">{hash}.json <span style="color:var(--red)">*</span> <span style="color:var(--text3)">(Enterprise SSO)</span></div>
       <div class="field-drop" id="dev-drop"
         onclick="document.getElementById('dev-file').click()"
         ondragover="onDragOver(event,'dev-drop')"
@@ -156,6 +191,18 @@
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeAddModal()">取消</button>
       <button class="btn btn-primary" onclick="submitAddAccount()" id="add-submit-btn">添加账号</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="confirm-modal">
+  <div class="modal confirm-modal">
+    <div class="confirm-icon" id="confirm-icon">⚠️</div>
+    <div class="confirm-title" id="confirm-title">确认操作？</div>
+    <div class="confirm-msg" id="confirm-msg">您确定要执行此操作吗？此过程可能无法撤销。</div>
+    <div class="confirm-actions">
+      <button class="btn btn-ghost" id="confirm-cancel-btn">取消</button>
+      <button class="btn btn-danger" id="confirm-ok-btn">确认执行</button>
     </div>
   </div>
 </div>

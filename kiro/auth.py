@@ -182,6 +182,11 @@ class KiroAuthManager:
         # Determine auth type based on available credentials
         self._detect_auth_type()
     
+    @property
+    def creds_dir(self) -> Optional[Path]:
+        """Directory containing the credentials file, if any."""
+        return Path(self._creds_file).parent if self._creds_file else None
+
     def _detect_auth_type(self) -> None:
         """
         Detects authentication type based on available credentials.

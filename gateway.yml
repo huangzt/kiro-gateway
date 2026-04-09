@@ -1,0 +1,28 @@
+# Kiro Gateway — Hot-reload configuration
+# Values here override .env without requiring a server restart.
+# Do NOT store credentials or tokens here — use .env for secrets.
+
+accounts:
+  disabled: []
+  kiro_cli_db_file: null
+  kiro_creds_file: null
+  multi_creds_dir: null
+  profile_arn: null
+  refresh_token: null
+  region: null
+logging:
+  debug_mode: all
+  log_history_size: null
+  log_level: WARNING
+pool:
+  cooldown_seconds: null
+  queue_timeout: null
+  quota_check_interval: null
+reasoning:
+  fake_reasoning: 'false'
+  fake_reasoning_handling: as_reasoning_content
+  fake_reasoning_max_tokens: null
+timeout:
+  first_token_max_retries: null
+  first_token_timeout: null
+  streaming_read_timeout: null

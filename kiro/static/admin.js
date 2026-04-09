@@ -189,28 +189,94 @@ function renderAccountCard(a) {
   const cooldownBtn = status === 'cooling'
     ? `<button class="btn btn-ghost" onclick="accountAction('${a.name}','cooldown-clear')">⚡ 解除冷却</button>` : '';
 
+  // Host Switch button
+  const switchHostBtn = `<button class="btn btn-ghost ${a.is_active_on_host ? 'disabled' : 'primary'}" 
+                                 onclick="switchHostAccount('${escAttr(a.name)}')" 
+                                 ${a.is_active_on_host ? 'disabled title="此账号已是主机活动账号"' : 'title="在主机上启用此账号"'}>
+                            🔀 切换
+                        </button>`;
+
+  // Files section
+  let filesHtml = '';
+  if (a.files && a.files.length > 0) {
+    const fileItems = a.files.map(f => `
+      <div class="file-item">
+        <span class="file-name" title="${escAttr(f)}">${escHtml(f)}</span>
+        <button class="file-dl-btn" onclick="downloadAccountFile('${escAttr(a.name)}','${escAttr(f)}')" title="下载此文件">💾</button>
+      </div>
+    `).join('');
+    
+    filesHtml = `
+      <div class="files-section">
+        <div class="files-title">🔑 凭证文件 (用于本地切换账号)</div>
+        <div class="files-list">${fileItems}</div>
+        <div class="help-tip">
+          💡 点击 <b>"切换账号"</b> 可同步到本地 IDE（需设置目录映射），或手动下载文件放入：<br>
+          • <b>Mac</b>: <code>~/.aws/sso/cache/</code><br>
+          • <b>Win</b>: <code>%USERPROFILE%\\.aws\\sso\\cache\\</code>
+        </div>
+      </div>`;
+  }
+
+  // Active status badge for host (放在状态徽章前面)
+  const activeHostBadge = a.is_active_on_host 
+    ? `<span class="host-active-badge" title="主机当前正在使用此账号">🏠 当前选用</span>` 
+    : '';
+
   return `
-    <div class="account-card status-${status}" id="card-${escAttr(a.name)}">
+    <div class="account-card status-${status} ${a.is_active_on_host ? 'active-host' : ''}" id="card-${escAttr(a.name)}">
       <div class="card-top">
-        <div>
-          <div class="card-name">📁 ${escHtml(a.name)}</div>
+        <div style="flex: 1">
+          <div class="card-name-row">
+            <div class="card-name">📁 ${escHtml(a.name)}</div>
+          </div>
           <div class="card-email">${escHtml(a.email || '邮箱未知')}</div>
         </div>
-        <span class="status-badge ${badgeCls}">${badgeTxt}</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          ${activeHostBadge}
+          <span class="status-badge ${badgeCls}">${badgeTxt}</span>
+        </div>
       </div>
       ${quotaHtml}
       ${cooldownHtml}
       <div class="card-stats">
-        <div class="cs-item"><div class="cs-label">活跃请求</div><div class="cs-val">${a.active_requests ?? 0}</div></div>
-        <div class="cs-item"><div class="cs-label">累计请求</div><div class="cs-val">${a.total_requests ?? 0}</div></div>
+        <div class="cs-item"><div class="cs-label">活跃</div><div class="cs-val">${a.active_requests ?? 0}</div></div>
+        <div class="cs-item"><div class="cs-label">累计</div><div class="cs-val">${a.total_requests ?? 0}</div></div>
       </div>
-      <div class="card-actions">
-        <button class="btn btn-ghost" onclick="accountAction('${a.name}','quota-refresh')">🔄 配额</button>
-        ${cooldownBtn}
+      <div class="card-actions-grid">
+        <button class="btn btn-ghost" onclick="accountAction('${escAttr(a.name)}','quota-refresh')">🔄 刷新</button>
         ${toggleDisabledBtn}
-        <button class="btn btn-danger" onclick="confirmDelete('${a.name}')">🗑</button>
+        <button class="btn btn-ghost danger" onclick="confirmDelete('${escAttr(a.name)}')">🗑 删除</button>
+        ${switchHostBtn}
       </div>
-    </div>`;
+      ${filesHtml}
+    </div>
+  `;
+}
+
+async function downloadAccountFile(accountName, fileName) {
+  try {
+    const res = await fetch(`${BASE}/admin/accounts/${accountName}/files/${fileName}`, {
+      headers: { 'X-Admin-Key': apiKey }
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      showToast('下载失败: ' + (data.detail || res.statusText), 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    a.remove();
+  } catch (e) {
+    showToast('下载失败: 网络错误', 'error');
+  }
 }
 
 async function accountAction(name, action) {
@@ -223,8 +289,37 @@ async function accountAction(name, action) {
   } catch (e) { showToast('网络错误', 'error'); }
 }
 
+async function switchHostAccount(name) {
+  const ok = await showConfirm({
+    title: '确认切换本地账号？',
+    message: `这会将账号 "${name}" 的凭证同步到主机 AWS 缓存目录。如果您正在使用 IDE，完成后点击插件刷新按钮即可生效。`,
+    okText: '确认切换',
+    type: 'primary'
+  });
+  if (!ok) return;
+
+  try {
+    const r = await apiFetch(`/admin/accounts/${encodeURIComponent(name)}/switch`, { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { 
+      showToast(data.detail || `切换失败`, 'error'); 
+      return; 
+    }
+    showToast(`成功切换主机账号为: ${name}`, 'success');
+    // 重要：切换后延迟一小段时间再刷新，确保后端文件写入完成且系统缓存同步
+    setTimeout(() => loadDashboard(), 300);
+  } catch (e) { showToast('网络错误', 'error'); }
+}
+
 async function confirmDelete(name) {
-  if (!confirm(`确定永久删除账号 "${name}"？\n\n此操作将删除凭证文件目录，不可恢复。`)) return;
+  const ok = await showConfirm({
+    title: '确认删除账号？',
+    message: `您确定要永久删除账号 "${name}" 吗？此操作将彻底删除凭证文件目录且不可恢复。`,
+    okText: '确认删除',
+    type: 'danger'
+  });
+  if (!ok) return;
+
   try {
     const r = await apiFetch(`/admin/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
     const data = await r.json().catch(() => ({}));
@@ -277,6 +372,7 @@ async function submitAddAccount() {
   const errEl = document.getElementById('add-error');
   const btn   = document.getElementById('add-submit-btn');
   if (!authFile) { errEl.textContent = '请先选择 kiro-auth-token.json'; return; }
+  if (!devFile) { errEl.textContent = '请先选择 {hash}.json (SSO 凭证)'; return; }
   const fd = new FormData();
   fd.append('auth_token_file', authFile, authFile.name);
   if (devFile) fd.append('device_reg_file', devFile, devFile.name);
@@ -314,16 +410,24 @@ const CONFIG_META = {
   reasoning: {
     label: '推理 / Thinking',
     fields: {
-      fake_reasoning:            { label: 'FAKE_REASONING_ENABLED', hint: '模拟推理，是否启用 fake thinking', type: 'select', options: ['true','false'] },
+      fake_reasoning:            { label: 'FAKE_REASONING_ENABLED', hint: '模拟推理，是否启用 fake thinking', type: 'select', 
+                                   options: { 'true': '开启', 'false': '关闭' } },
       fake_reasoning_max_tokens: { label: 'FAKE_REASONING_MAX_TOKENS', hint: '推理最大 Tokens', type: 'number' },
-      fake_reasoning_handling:   { label: 'FAKE_REASONING_HANDLING', hint: '推理内容处理方式', type: 'select', options: ['as_reasoning_content','as_text_prefix','strip'] },
+      fake_reasoning_handling:   { label: 'FAKE_REASONING_HANDLING', hint: '推理内容处理方式', type: 'select', 
+                                   options: { 
+                                     'as_reasoning_content': 'as_reasoning_content (作为推理字段 - 推荐 3.7)', 
+                                     'as_text_prefix': 'as_text_prefix (作为正文前缀)', 
+                                     'strip': 'strip (直接丢弃)' 
+                                   } },
     }
   },
   logging: {
     label: '日志 / 调试',
     fields: {
-      log_level:        { label: 'LOG_LEVEL', hint: '日志级别', type: 'select', options: ['DEBUG','INFO','WARNING','ERROR'] },
-      debug_mode:       { label: 'DEBUG_MODE', hint: '请求调试模式 (off/errors/all)', type: 'select', options: ['off','errors','all'] },
+      log_level:        { label: 'LOG_LEVEL', hint: '日志级别', type: 'select', 
+                           options: { 'DEBUG': 'DEBUG (详细)', 'INFO': 'INFO (常规)', 'WARNING': 'WARNING (警告)', 'ERROR': 'ERROR (错误)' } },
+      debug_mode:       { label: 'DEBUG_MODE', hint: '请求调试模式 (off/errors/all)', type: 'select', 
+                           options: { 'off': 'off (禁用)', 'errors': 'errors (仅错误 - 推荐)', 'all': 'all (全量请求)' } },
       log_history_size: { label: 'LOG_HISTORY_SIZE', hint: '日志历史条数，内存中保留的最近条数', type: 'number' },
     }
   },
@@ -338,6 +442,21 @@ const CONFIG_META = {
       region: { label: 'KIRO_REGION', type: 'text', hint: 'AWS Region (默认 us-east-1)，置空用 .env' },
     }
   },
+};
+
+const ENV_HINTS = {
+  PROXY_API_KEY:        "连接网关所需的鉴权密钥 (Header: Authorization: Bearer ...)",
+  KIRO_MULTI_CREDS_DIR: "多账号模式专用的凭证目录 (扫描子文件夹中的凭证)",
+  KIRO_REGION:          "连接 AWS 的区域代码 (示例: us-east-1)",
+  KIRO_HOST_CACHE_DIR:  "主机凭证映射路径 (用于一键切换本地 IDE 账号)",
+  VPN_PROXY_URL:        "外部网络代理，支持 http:// 或 socks5://",
+  SERVER_PORT:          "网关监听端口 (如需修改请编辑 .env 并重启 Docker)",
+  SERVER_HOST:          "网关监听地址 (通常为 0.0.0.1)",
+  DEBUG_MODE:           "请求调试记录等级 (off / errors / all)",
+  REFRESH_TOKEN:        "单账号模式下的离线刷新令牌",
+  KIRO_CREDS_FILE:      "单账号模式下的凭证文件路径",
+  KIRO_CLI_DB_FILE:     "Kiro CLI 数据库文件路径 (SQLite)",
+  PROFILE_ARN:          "AWS IAMIdentityCenter Profile ARN (Enterprise 模式)",
 };
 
 async function loadConfig() {
@@ -376,9 +495,14 @@ function renderConfigGrid(data) {
 
       let inputHtml = '';
       if (f.type === 'select') {
-        const opts = f.options.map(o =>
-          `<option value="${o}" ${String(displayVal) === o ? 'selected' : ''}>${o}</option>`
-        ).join('');
+        let opts = '';
+        if (Array.isArray(f.options)) {
+          opts = f.options.map(o => `<option value="${o}" ${String(displayVal) === o ? 'selected' : ''}>${o}</option>`).join('');
+        } else {
+          opts = Object.entries(f.options).map(([val, label]) => 
+            `<option value="${val}" ${String(displayVal) === val ? 'selected' : ''}>${label}</option>`
+          ).join('');
+        }
         inputHtml = `<select class="config-val-select" data-section="${section}" data-key="${key}" onchange="onConfigChange(this,'${section}','${key}')">
           ${opts}
         </select>`;
@@ -409,19 +533,25 @@ function renderConfigGrid(data) {
 function renderEnvGrid(envCfg) {
   const grid = document.getElementById('env-grid');
   grid.innerHTML = Object.entries(envCfg).map(([section, fields]) => {
-    const rows = Object.entries(fields).map(([k, v]) =>
-      `<div class="config-row">
-        <div class="config-key-wrap"><div class="config-key">${k}</div></div>
+    const rows = Object.entries(fields).map(([k, v]) => {
+      const hint = ENV_HINTS[k] ? `<div class="config-hint">${ENV_HINTS[k]}</div>` : '';
+      return `<div class="config-row">
+        <div class="config-key-wrap">
+          <div class="config-key">${k}</div>
+          ${hint}
+        </div>
         <input class="config-val-input readonly" value="${escHtml(String(v))}" readonly>
-      </div>`
-    ).join('');
+      </div>`;
+    }).join('');
     return `<div class="config-group"><div class="config-group-title">${section}</div>${rows}</div>`;
   }).join('');
 }
 
 function onConfigChange(el, section, key) {
   if (!configDraft[section]) configDraft[section] = {};
-  const v = el.value;
+  let v = el.value;
+  if (v === 'true') v = true;
+  else if (v === 'false') v = false;
   configDraft[section][key] = v === '' ? null : (el.type === 'number' ? Number(v) : v);
   const el2 = document.getElementById('save-status');
   el2.textContent = '● 有未保存的修改';
@@ -630,3 +760,42 @@ function escHtml(s) {
     .replace(/"/g,'&quot;');
 }
 function escAttr(s) { return String(s).replace(/"/g,'&quot;'); }
+
+/** ─── Custom Confirmation Modal ────────────────────────── */
+function showConfirm({ title, message, icon = '⚠️', okText = '确认执行', cancelText = '取消', type = 'danger' }) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('confirm-modal');
+    const titleEl = document.getElementById('confirm-title');
+    const msgEl = document.getElementById('confirm-msg');
+    const iconEl = document.getElementById('confirm-icon');
+    const okBtn = document.getElementById('confirm-ok-btn');
+    const cancelBtn = document.getElementById('confirm-cancel-btn');
+
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    iconEl.textContent = icon;
+    okBtn.textContent = okText;
+    cancelBtn.textContent = cancelText;
+
+    // Reset and apply button classes
+    okBtn.className = 'btn';
+    okBtn.classList.add(type === 'danger' ? 'btn-danger' : 'btn-primary');
+
+    modal.classList.add('open');
+
+    const cleanup = (val) => {
+      modal.classList.remove('open');
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(val);
+    };
+
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+    
+    // Also close on background click
+    modal.onclick = (e) => {
+      if (e.target === modal) cleanup(false);
+    };
+  });
+}
