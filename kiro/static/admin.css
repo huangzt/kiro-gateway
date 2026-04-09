@@ -135,7 +135,7 @@ body {
 }
 
 /* ─── Stats Row ──────────────────────────────────────────── */
-.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
 .stat-card {
   background: var(--card-bg); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 18px 20px;
