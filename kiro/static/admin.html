@@ -101,7 +101,10 @@
       </div>
       <div class="section-header">
         <div><span class="section-title">账号列表</span><span class="section-sub" id="account-count"></span></div>
-        <button class="btn btn-ghost" onclick="loadDashboard()">↻ 刷新</button>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-ghost" onclick="refreshAllQuotas()">🔄 全部刷新</button>
+          <!-- <button class="btn btn-ghost" onclick="loadDashboard()">↻ 刷新</button> -->
+        </div>
       </div>
       <div id="account-grid" class="account-grid">
         <div class="skeleton"></div>

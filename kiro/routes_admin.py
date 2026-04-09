@@ -309,6 +309,85 @@ async def refresh_quota(account_name: str, request: Request) -> JSONResponse:
 
 
 @router.post(
+    "/accounts/quota-refresh-all",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def refresh_all_quotas(request: Request) -> JSONResponse:
+    """
+    Manually trigger quota refresh for all accounts in the pool.
+
+    This endpoint refreshes quota information for all accounts concurrently,
+    making it efficient for bulk operations.
+
+    Args:
+        request: FastAPI request
+
+    Returns:
+        Summary of refresh results including success/failure counts
+
+    Example response:
+        {
+            "success": true,
+            "total": 5,
+            "refreshed": 4,
+            "failed": 1,
+            "results": [
+                {"account": "account-1", "success": true},
+                {"account": "account-2", "success": false, "error": "Network timeout"}
+            ]
+        }
+    """
+    pool: AccountPool = request.app.state.account_pool
+
+    # Get all slots
+    all_slots = pool.slots
+    if not all_slots:
+        return JSONResponse(
+            content={
+                "success": True,
+                "total": 0,
+                "refreshed": 0,
+                "failed": 0,
+                "results": [],
+            }
+        )
+
+    # Refresh all quotas concurrently
+    results = []
+    tasks = []
+
+    async def refresh_single(slot: AccountSlot) -> dict:
+        """Refresh a single slot and return result."""
+        try:
+            await pool._check_slot_quota(slot)
+            return {"account": slot.name, "success": True}
+        except Exception as exc:
+            logger.warning(f"Failed to refresh quota for '{slot.name}': {exc}")
+            return {"account": slot.name, "success": False, "error": str(exc)}
+
+    # Create tasks for all slots
+    for slot in all_slots:
+        tasks.append(refresh_single(slot))
+
+    # Execute all refreshes concurrently
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    # Count successes and failures
+    refreshed = sum(1 for r in results if r.get("success"))
+    failed = len(results) - refreshed
+
+    return JSONResponse(
+        content={
+            "success": True,
+            "total": len(results),
+            "refreshed": refreshed,
+            "failed": failed,
+            "results": results,
+        }
+    )
+
+
+@router.post(
     "/accounts/{account_name}/cooldown-clear",
     dependencies=[Depends(verify_admin_key)],
 )

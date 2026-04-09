@@ -58,7 +58,7 @@ async function showApp() {
   startSSE();
   autoRefreshTimer = setInterval(() => {
     if (document.getElementById('pane-dashboard').classList.contains('active')) loadDashboard();
-  }, 10000);
+  }, 180000); // 3 minutes = 180000ms
 }
 
 // Auto-login
@@ -306,6 +306,38 @@ async function accountAction(name, action) {
     showToast(`${name}: ${action} ✓`, 'success');
     loadDashboard();
   } catch (e) { showToast('网络错误', 'error'); }
+}
+
+async function refreshAllQuotas() {
+  const btn = event.target;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '🔄 刷新中…';
+
+  try {
+    const r = await apiFetch('/admin/accounts/quota-refresh-all', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      showToast(data.detail || '批量刷新失败', 'error');
+      return;
+    }
+
+    const { total, refreshed, failed } = data;
+    if (failed > 0) {
+      showToast(`刷新完成: ${refreshed}/${total} 成功，${failed} 失败`, 'warning');
+    } else {
+      showToast(`全部刷新成功 (${refreshed}/${total})`, 'success');
+    }
+
+    // Reload dashboard to show updated quotas
+    loadDashboard();
+  } catch (e) {
+    showToast('网络错误', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
 }
 
 async function switchHostAccount(name) {
