@@ -38,6 +38,11 @@
 <!-- ── APP SHELL ───────────────────────────────────────────── -->
 <div id="app">
   <div class="topbar">
+    <button class="menu-toggle" onclick="toggleDrawer()" id="menu-toggle">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
     <div class="topbar-logo">
       <svg viewBox="0 0 36 36" fill="none" width="24" height="24">
         <rect width="36" height="36" rx="8" fill="url(#lg2)"/>
@@ -57,6 +62,48 @@
       <span id="mode-badge" class="badge-mode single">Single</span>
       <span id="last-refresh" style="font-size:11px;color:var(--text3)"></span>
       <button class="logout-btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <!-- Mobile Drawer -->
+  <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-header">
+      <div class="drawer-logo">
+        <svg viewBox="0 0 36 36" fill="none" width="28" height="28">
+          <rect width="36" height="36" rx="8" fill="url(#lg3)"/>
+          <path d="M10 18h6l4-8 4 16 4-8h4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs><linearGradient id="lg3" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#6366f1"/><stop offset="1" stop-color="#8b5cf6"/>
+          </linearGradient></defs>
+        </svg>
+        <span>Kiro Gateway</span>
+      </div>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+    <nav class="drawer-nav">
+      <button class="drawer-nav-btn active" onclick="switchTabMobile('dashboard')" id="drawer-tab-dashboard">
+        <span class="drawer-nav-icon">📊</span>
+        <span>Dashboard</span>
+      </button>
+      <button class="drawer-nav-btn" onclick="switchTabMobile('config')" id="drawer-tab-config">
+        <span class="drawer-nav-icon">⚙️</span>
+        <span>配置</span>
+      </button>
+      <button class="drawer-nav-btn" onclick="switchTabMobile('logs')" id="drawer-tab-logs">
+        <span class="drawer-nav-icon">📄</span>
+        <span>日志</span>
+      </button>
+    </nav>
+    <div class="drawer-footer">
+      <div class="drawer-info">
+        <span id="drawer-mode-badge" class="badge-mode single">Single</span>
+        <span id="drawer-last-refresh" style="font-size:11px;color:var(--text3)"></span>
+      </div>
+      <button class="drawer-logout-btn" onclick="doLogout()">
+        <span>🚪</span>
+        <span>退出登录</span>
+      </button>
     </div>
   </div>
 

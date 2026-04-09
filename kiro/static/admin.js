@@ -859,3 +859,60 @@ function showConfirm({ title, message, icon = '⚠️', okText = '确认执行',
     };
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+// Mobile Drawer
+// ═══════════════════════════════════════════════════════════
+function toggleDrawer() {
+  const drawer = document.getElementById('drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  const toggle = document.getElementById('menu-toggle');
+  
+  const isOpen = drawer.classList.contains('open');
+  
+  if (isOpen) {
+    closeDrawer();
+  } else {
+    drawer.classList.add('open');
+    overlay.classList.add('open');
+    toggle.classList.add('active');
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closeDrawer() {
+  const drawer = document.getElementById('drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  const toggle = document.getElementById('menu-toggle');
+  
+  drawer.classList.remove('open');
+  overlay.classList.remove('open');
+  toggle.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function switchTabMobile(name) {
+  // Switch tab
+  switchTab(name);
+  
+  // Update drawer nav buttons
+  document.querySelectorAll('.drawer-nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('drawer-tab-' + name).classList.add('active');
+  
+  // Close drawer
+  closeDrawer();
+}
+
+// Update drawer info when dashboard updates
+const originalRenderDashboard = renderDashboard;
+renderDashboard = function(data) {
+  originalRenderDashboard(data);
+  
+  // Sync drawer badge and refresh time
+  const badge = document.getElementById('drawer-mode-badge');
+  const isMulti = data.mode === 'multi';
+  badge.textContent = isMulti ? 'Multi' : 'Single';
+  badge.className = 'badge-mode ' + (isMulti ? 'multi' : 'single');
+  
+  document.getElementById('drawer-last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString();
+};
