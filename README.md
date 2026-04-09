@@ -34,7 +34,7 @@
 1. **环境准备**：确保已安装 Python 3.10+。
 2. **克隆项目**：
    ```bash
-   git clone -b feature/anthropic-tool-reference-support https://github.com/huangzt/kiro-gateway.git
+   git clone https://github.com/huangzt/kiro-gateway.git
    cd kiro-gateway
    ```
 3. **安装依赖**：

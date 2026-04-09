@@ -45,43 +45,27 @@
 
 ---
 
-## ✨ 功能特性
+## ✨ 核心特性
 
-| 功能 | 描述 |
-|------|------|
-| 🔌 **兼容 OpenAI 的 API** | 与任何兼容 OpenAI 的工具配合使用 |
-| 🔌 **兼容 Anthropic 的 API** | 原生 `/v1/messages` 端点 |
-| 🌐 **VPN/代理支持** | 用于受限网络的 HTTP/SOCKS5 代理 |
-| 🧠 **扩展思维** | 推理功能是我们项目的独家特性 |
-| 👁️ **视觉支持** | 向模型发送图像 |
-| 🛠️ **工具调用** | 支持函数调用 |
-| 💬 **完整消息历史** | 传递完整的对话上下文 |
-| 📡 **流式传输** | 完整的 SSE 流式传输支持 |
-| 🔄 **重试逻辑** | 错误时自动重试（403、429、5xx） |
-| 📋 **扩展模型列表** | 包括版本化模型 |
-| 🔐 **智能令牌管理** | 到期前自动刷新 |
+- 🔌 **全兼容接口**：同时支持 OpenAI 和 Anthropic 两种 API 格式。
+- 🖥️ **可视化后台**：内置美观的管理面板，实时监控请求、管理账号、在线查看日志。
+- 🧠 **深度思考支持**：原生支持 Claude 延伸思考（Extended Thinking）块的解析与转发。
+- 🔀 **智能账号池**：多账号并发排队，支持自动配额检查、限速冷却以及一键切换。
+- 📡 **流式响应**：全量 SSE 流式输出支持，响应速度与原版无异。
+- 🌐 **代理支持**：支持 HTTP/SOCKS5 代理，解决国内环境网络连接问题。
 
 ---
 
 ## 🚀 快速开始
 
-**选择您的部署方法：**
-- 🐍 **原生 Python** - 完全控制，轻松调试
-- 🐳 **Docker** - 隔离环境，轻松部署 → [跳转到 Docker](#-docker-deployment)
+### 方法 A: 本地开发运行 (推荐用于调试)
 
-### 前置要求
-
-- Python 3.10+
-- 以下之一：
-  - 已登录账户的 [Kiro IDE](https://kiro.dev/)，或
-  - 带有 AWS SSO (AWS IAM Identity Center, OIDC) 的 [Kiro CLI](https://kiro.dev/cli/) - 免费 Builder ID 或企业账户
-
-### 安装
-
-```bash
-# 克隆仓库（需要 Git）
-git clone https://github.com/Jwadow/kiro-gateway.git
-cd kiro-gateway
+1. **环境准备**：确保已安装 Python 3.10+。
+2. **克隆项目**：
+   ```bash
+   git clone https://github.com/huangzt/kiro-gateway.git
+   cd kiro-gateway
+   ```
 
 # 或下载 ZIP：Code → Download ZIP → 解压 → 打开 kiro-gateway 文件夹
 
