@@ -158,6 +158,24 @@ function renderAccountCard(a) {
     const { used = 0, limit = 0, remaining = 0, plan = '', next_reset = '—' } = a.quota;
     const pct = limit > 0 ? (used / limit * 100) : 0;
     const fillCls = pct >= 95 ? 'danger' : pct >= 80 ? 'warning' : '';
+    const formatNextReset = (str) => {
+      if (!str || str === '—') return '—';
+      try {
+        const d = new Date(str);
+        if (isNaN(d.getTime())) return str;
+        const fmt = d => `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
+        const reset = fmt(d);
+        const trialD = new Date(d.getTime() + 7 * 24 * 3600 * 1000);
+        const diffDays = Math.ceil((trialD - new Date()) / (24 * 3600 * 1000));
+        let remColor = 'var(--green)';
+        let remText = ` (剩${diffDays}天)`;
+        if (diffDays <= 0) { remColor = 'var(--red)'; remText = ' (已过期)'; }
+        else if (diffDays <= 2) { remColor = 'var(--yellow)'; }
+        const remSpan = `<span style="color:${remColor};font-size:10px">${remText}</span>`;
+        return `<span style="color:var(--accent);font-weight:600">重置 ${reset}</span> · <span style="color:var(--blue);font-weight:600">试用 ${fmt(trialD)}</span>${remSpan}`;
+      } catch(e) { return str; }
+    };
+
     quotaHtml = `
       <div class="quota-section">
         <div class="quota-labels">
@@ -166,8 +184,8 @@ function renderAccountCard(a) {
         </div>
         <div class="progress-bar"><div class="progress-fill ${fillCls}" style="width:${Math.min(pct,100).toFixed(1)}%"></div></div>
         <div class="quota-meta">
-          <span>剩余 ${remaining.toFixed(1)}${plan ? ' · ' + plan : ''}</span>
-          <span>重置 ${next_reset}</span>
+          <span>剩余 ${remaining.toFixed(1)}</span>
+          <span>${formatNextReset(next_reset)}</span>
         </div>
       </div>`;
   } else {
@@ -225,16 +243,17 @@ function renderAccountCard(a) {
 
   return `
     <div class="account-card status-${status} ${a.is_active_on_host ? 'active-host' : ''}" id="card-${escAttr(a.name)}">
-      <div class="card-top">
-        <div style="flex: 1">
-          <div class="card-name-row">
-            <div class="card-name">📁 ${escHtml(a.name)}</div>
+      <div class="card-top" style="flex-direction: column; align-items: stretch; gap: 6px; margin-bottom: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div class="card-name" style="margin-bottom: 0">📁 ${escHtml(a.name)}</div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            ${activeHostBadge}
+            <span class="status-badge ${badgeCls}">${badgeTxt}</span>
           </div>
-          <div class="card-email">${escHtml(a.email || '邮箱未知')}</div>
         </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          ${activeHostBadge}
-          <span class="status-badge ${badgeCls}">${badgeTxt}</span>
+        <div class="card-email" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          ${escHtml(a.email || '邮箱未知')}
+          ${a.quota?.plan ? ` · <span style="color:var(--text3); font-weight:500; font-size:11px">${escHtml(a.quota.plan)}</span>` : ''}
         </div>
       </div>
       ${quotaHtml}
