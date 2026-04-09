@@ -216,6 +216,7 @@ function renderAccountCard(a) {
 
   // Files section
   let filesHtml = '';
+  /*
   if (a.files && a.files.length > 0) {
     const fileItems = a.files.map(f => `
       <div class="file-item">
@@ -223,7 +224,7 @@ function renderAccountCard(a) {
         <button class="file-dl-btn" onclick="downloadAccountFile('${escAttr(a.name)}','${escAttr(f)}')" title="下载此文件">💾</button>
       </div>
     `).join('');
-    
+
     filesHtml = `
       <div class="files-section">
         <div class="files-title">🔑 凭证文件 (用于本地切换账号)</div>
@@ -235,6 +236,7 @@ function renderAccountCard(a) {
         </div>
       </div>`;
   }
+  */
 
   // Active status badge for host (放在状态徽章前面)
   const activeHostBadge = a.is_active_on_host 
@@ -259,8 +261,14 @@ function renderAccountCard(a) {
       ${quotaHtml}
       ${cooldownHtml}
       <div class="card-stats">
-        <div class="cs-item"><div class="cs-label">活跃</div><div class="cs-val">${a.active_requests ?? 0}</div></div>
-        <div class="cs-item"><div class="cs-label">累计</div><div class="cs-val">${a.total_requests ?? 0}</div></div>
+        <div class="cs-item">
+          <div class="cs-label">活跃请求</div>
+          <div class="cs-val text-active">${a.active_requests ?? 0}</div>
+        </div>
+        <div class="cs-item">
+          <div class="cs-label">累计请求</div>
+          <div class="cs-val">${a.total_requests ?? 0}</div>
+        </div>
       </div>
       <div class="card-actions-grid">
         <button class="btn btn-ghost" onclick="accountAction('${escAttr(a.name)}','quota-refresh')">🔄 刷新</button>
