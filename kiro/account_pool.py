@@ -577,6 +577,12 @@ class AccountPool:
 
             accounts_status.append(account_info)
 
+        # Calculate total remaining quota (only for enabled accounts with quota info)
+        total_remaining = 0.0
+        for slot in self._slots:
+            if not slot.is_disabled and slot.quota_info:
+                total_remaining += slot.quota_info.remaining
+
         return {
             "total_accounts": self.size,
             "available": self.available_count,
@@ -584,6 +590,7 @@ class AccountPool:
             "cooling_down": cooling_count,
             "exhausted": exhausted_count,
             "disabled": disabled_count,
+            "total_remaining_quota": round(total_remaining, 1),
             "accounts": accounts_status,
         }
 

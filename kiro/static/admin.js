@@ -58,7 +58,7 @@ async function showApp() {
   startSSE();
   autoRefreshTimer = setInterval(() => {
     if (document.getElementById('pane-dashboard').classList.contains('active')) loadDashboard();
-  }, 180000); // 3 minutes = 180000ms
+  }, 60000); // 1 minutes = 60000ms
 }
 
 // Auto-login
@@ -119,6 +119,7 @@ function renderDashboard(data) {
   document.getElementById('s-cooling').textContent   = data.cooling_down ?? '—';
   document.getElementById('s-exhausted').textContent = data.exhausted ?? '—';
   document.getElementById('s-disabled').textContent  = data.disabled ?? '—';
+  document.getElementById('s-quota').textContent     = data.total_remaining_quota ?? '—';
 
   const badge = document.getElementById('mode-badge');
   const isMulti = data.mode === 'multi';
