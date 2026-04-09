@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kiro Gateway — Admin</title>
+<meta name="description" content="Kiro Gateway 管理面板：账号监控、配置热更新、实时日志">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin-static/admin.css">
+</head>
+<body>
+
+<!-- ── LOGIN ──────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg viewBox="0 0 36 36" fill="none">
+        <rect width="36" height="36" rx="10" fill="url(#lg1)"/>
+        <path d="M10 18h6l4-8 4 16 4-8h4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <defs><linearGradient id="lg1" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#6366f1"/><stop offset="1" stop-color="#8b5cf6"/>
+        </linearGradient></defs>
+      </svg>
+      <div>
+        <span>Kiro Gateway</span>
+        <div class="sub">Admin Console</div>
+      </div>
+    </div>
+    <div class="login-label">Admin API Key</div>
+    <input id="key-input" class="login-input" type="password" placeholder="Enter PROXY_API_KEY…" autocomplete="off">
+    <button class="login-btn" onclick="doLogin()">登录管理控制台</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
+<!-- ── APP SHELL ───────────────────────────────────────────── -->
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-logo">
+      <svg viewBox="0 0 36 36" fill="none" width="24" height="24">
+        <rect width="36" height="36" rx="8" fill="url(#lg2)"/>
+        <path d="M10 18h6l4-8 4 16 4-8h4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <defs><linearGradient id="lg2" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#6366f1"/><stop offset="1" stop-color="#8b5cf6"/>
+        </linearGradient></defs>
+      </svg>
+      Kiro Gateway
+    </div>
+    <nav class="topbar-nav">
+      <button class="nav-btn active" onclick="switchTab('dashboard')" id="tab-dashboard">📊 Dashboard</button>
+      <button class="nav-btn" onclick="switchTab('config')" id="tab-config">⚙️ 配置</button>
+      <button class="nav-btn" onclick="switchTab('logs')" id="tab-logs">📄 日志</button>
+    </nav>
+    <div class="topbar-right">
+      <span id="mode-badge" class="badge-mode single">Single</span>
+      <span id="last-refresh" style="font-size:11px;color:var(--text3)"></span>
+      <button class="logout-btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <!-- Dashboard -->
+    <div id="pane-dashboard" class="tab-pane active">
+      <div class="stats-row">
+        <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="s-total">—</div></div>
+        <div class="stat-card"><div class="stat-label">活跃</div><div class="stat-val green" id="s-active">—</div></div>
+        <div class="stat-card"><div class="stat-label">冷却中</div><div class="stat-val yellow" id="s-cooling">—</div></div>
+        <div class="stat-card"><div class="stat-label">已耗尽</div><div class="stat-val red" id="s-exhausted">—</div></div>
+        <div class="stat-card"><div class="stat-label">已禁用</div><div class="stat-val gray" id="s-disabled">—</div></div>
+      </div>
+      <div class="section-header">
+        <div><span class="section-title">账号列表</span><span class="section-sub" id="account-count"></span></div>
+        <button class="btn btn-ghost" onclick="loadDashboard()">↻ 刷新</button>
+      </div>
+      <div id="account-grid" class="account-grid">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+    </div>
+
+    <!-- Config -->
+    <div id="pane-config" class="tab-pane">
+      <div class="section-header" style="margin-bottom:20px">
+        <span class="section-title">热更新配置</span>
+        <span style="font-size:12px;color:var(--text3)">保存后立即生效，无需重启 · 存入 gateway.yml</span>
+      </div>
+      <div class="config-grid" id="config-grid">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+      <div class="section-header" style="margin-top:24px;margin-bottom:16px">
+        <span class="section-title">静态环境变量</span>
+        <span style="font-size:12px;color:var(--text3)">只读 · 修改需编辑 .env 并重启</span>
+      </div>
+      <div id="env-grid" class="config-grid"></div>
+      <div class="config-save-bar">
+        <span class="save-status" id="save-status">准备就绪</span>
+        <button class="btn btn-primary lg" onclick="saveConfig()">💾 保存配置</button>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    <div id="pane-logs" class="tab-pane">
+      <div class="logs-toolbar">
+        <div class="level-toggle">
+          <button class="level-btn active-DEBUG"   data-level="DEBUG"   onclick="toggleLevel(this)">DEBUG</button>
+          <button class="level-btn active-INFO"    data-level="INFO"    onclick="toggleLevel(this)">INFO</button>
+          <button class="level-btn active-WARNING" data-level="WARNING" onclick="toggleLevel(this)">WARN</button>
+          <button class="level-btn active-ERROR"   data-level="ERROR"   onclick="toggleLevel(this)">ERROR</button>
+        </div>
+        <input class="log-search" id="log-search" placeholder="过滤关键词…" oninput="applyLogFilter()">
+        <span id="sse-status" class="log-sse-status sse-connecting">● 连接中</span>
+        <span class="log-count" id="log-count">0 条</span>
+        <div class="log-controls">
+          <button class="log-ctrl-btn" onclick="clearLogs()">清屏</button>
+          <button class="log-ctrl-btn" id="pause-btn" onclick="togglePause()">⏸ 暂停</button>
+          <button class="log-ctrl-btn autoscroll-on" id="scroll-btn" onclick="toggleAutoScroll()">⬇ 自动滚动</button>
+        </div>
+      </div>
+      <div class="log-stream" id="log-stream"></div>
+    </div>
+  </div>
+</div>
+
+<!-- FAB -->
+<button class="fab" id="add-fab" title="添加账号" onclick="openAddModal()">+</button>
+
+<!-- Modal: Add Account -->
+<div class="modal-bg" id="add-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeAddModal()">✕</button>
+    <div class="modal-title">添加账号</div>
+    <div class="modal-sub">上传凭证文件，自动创建账号目录并热加入账号池</div>
+    <div class="field">
+      <div class="field-label">kiro-auth-token.json <span style="color:var(--red)">*</span></div>
+      <div class="field-drop" id="auth-drop"
+        onclick="document.getElementById('auth-file').click()"
+        ondragover="onDragOver(event,'auth-drop')"
+        ondragleave="onDragLeave('auth-drop')"
+        ondrop="onDrop(event,'auth-drop','auth-file')">📄 点击选择或拖放文件</div>
+      <input type="file" id="auth-file" accept=".json" style="display:none" onchange="onFileSelect(this,'auth-drop')">
+    </div>
+    <div class="field">
+      <div class="field-label">{hash}.json <span style="color:var(--text3)">(可选 · Enterprise SSO)</span></div>
+      <div class="field-drop" id="dev-drop"
+        onclick="document.getElementById('dev-file').click()"
+        ondragover="onDragOver(event,'dev-drop')"
+        ondragleave="onDragLeave('dev-drop')"
+        ondrop="onDrop(event,'dev-drop','dev-file')">📄 点击选择或拖放文件</div>
+      <input type="file" id="dev-file" accept=".json" style="display:none" onchange="onFileSelect(this,'dev-drop')">
+    </div>
+    <div id="add-error" style="color:var(--red);font-size:13px;min-height:18px;margin-bottom:4px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeAddModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitAddAccount()" id="add-submit-btn">添加账号</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script src="/admin-static/admin.js"></script>
+</body>
+</html>

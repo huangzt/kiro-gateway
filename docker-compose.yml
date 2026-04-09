@@ -66,6 +66,10 @@ services:
       
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs
+
+      # Mount gateway.yml for hot-reload config persistence (Admin UI)
+      # Config changes via Admin UI are persisted here across container restarts
+      - ./gateway.yml:/app/gateway.yml
     
     restart: unless-stopped
     

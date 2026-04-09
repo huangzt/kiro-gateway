@@ -50,6 +50,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from kiro.config import (
@@ -64,7 +65,6 @@ from kiro.config import (
     KIRO_MULTI_CREDS_DIR,
     QUEUE_TIMEOUT,
     PROXY_API_KEY,
-    LOG_LEVEL,
     SERVER_HOST,
     SERVER_PORT,
     DEFAULT_SERVER_HOST,
@@ -84,15 +84,27 @@ from kiro.model_resolver import ModelResolver
 from kiro.account_pool import AccountPool
 from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
+from kiro.routes_admin import router as admin_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro.admin_config import AdminConfig
+from kiro.log_broadcaster import LogBroadcaster
 
 
 # --- Loguru Configuration ---
+def dynamic_log_filter(record):
+    import kiro.config as cfg
+    level_name = getattr(cfg, "LOG_LEVEL", "INFO")
+    try:
+        min_level = logger.level(level_name).no
+    except Exception:
+        min_level = 20  # INFO default
+    return record["level"].no >= min_level
+
 logger.remove()
 logger.add(
     sys.stderr,
-    level=LOG_LEVEL,
+    filter=dynamic_log_filter,
     colorize=True,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 )
@@ -321,17 +333,70 @@ def validate_configuration() -> None:
 async def lifespan(app: FastAPI):
     """
     Manages the application lifecycle.
-    
+
     Creates and initializes:
+    - AdminConfig (gateway.yml hot-reload)
+    - LogBroadcaster (SSE log streaming)
     - Shared HTTP client with connection pooling
     - KiroAuthManager for token management
     - ModelInfoCache for model caching
-    
+
     The shared HTTP client is used by all requests to reduce memory usage
     and enable connection reuse. This is especially important for handling
     concurrent requests efficiently (fixes issue #24).
     """
     logger.info("Starting application... Creating state managers.")
+
+    # ==========================================================================
+    # AdminConfig — load gateway.yml hot-reload config
+    # ==========================================================================
+    admin_config = AdminConfig("gateway.yml")
+    app.state.admin_config = admin_config
+
+    # ==========================================================================
+    # LogBroadcaster — SSE log streaming with ring-buffer history
+    # ==========================================================================
+    history_size = admin_config.get("logging", "log_history_size") or 200
+    broadcaster = LogBroadcaster(history_size=int(history_size))
+    app.state.log_broadcaster = broadcaster
+
+    # Register as loguru sink (after the stderr sink already added above)
+    import kiro.log_broadcaster as _lb_module
+    _lb_module.log_broadcaster = broadcaster
+    logger.add(broadcaster.write, format="{message}", filter=dynamic_log_filter, enqueue=False)
+    logger.info(f"LogBroadcaster initialized (history_size={history_size})")
+
+    # ==========================================================================
+    # Apply gateway.yml overrides to runtime config module globals
+    # ==========================================================================
+    import kiro.config as _cfg
+
+    def _apply_yml_override(section: str, key: str, target_attr: str, cast=None):
+        """Apply a gateway.yml value to kiro.config module global if set."""
+        val = admin_config.get(section, key)
+        if val is not None:
+            try:
+                setattr(_cfg, target_attr, cast(val) if cast else val)
+                logger.debug(f"gateway.yml override: {target_attr} = {val}")
+            except (ValueError, TypeError) as exc:
+                logger.warning(f"Invalid gateway.yml value for {section}.{key}: {exc}")
+
+    _apply_yml_override("pool", "cooldown_seconds",     "COOLDOWN_SECONDS",          float)
+    _apply_yml_override("pool", "queue_timeout",        "QUEUE_TIMEOUT",             float)
+    _apply_yml_override("pool", "quota_check_interval", "QUOTA_CHECK_INTERVAL",      float)
+    _apply_yml_override("timeout", "first_token_timeout",    "FIRST_TOKEN_TIMEOUT",      float)
+    _apply_yml_override("timeout", "first_token_max_retries","FIRST_TOKEN_MAX_RETRIES",  int)
+    _apply_yml_override("timeout", "streaming_read_timeout", "STREAMING_READ_TIMEOUT",   float)
+    _apply_yml_override("reasoning", "fake_reasoning",          "FAKE_REASONING_ENABLED",   bool)
+    _apply_yml_override("reasoning", "fake_reasoning_max_tokens","FAKE_REASONING_MAX_TOKENS",int)
+    _apply_yml_override("reasoning", "fake_reasoning_handling",  "FAKE_REASONING_HANDLING",  str)
+    _apply_yml_override("logging",   "log_level",   "LOG_LEVEL",  str)
+    _apply_yml_override("logging",   "debug_mode",  "DEBUG_MODE", str)
+
+    # Re-read after possible override
+    effective_queue_timeout = _cfg.QUEUE_TIMEOUT
+    effective_quota_interval = _cfg.QUOTA_CHECK_INTERVAL
+
     
     # Create shared HTTP client with connection pooling
     # This reduces memory usage and enables connection reuse across requests
@@ -358,24 +423,41 @@ async def lifespan(app: FastAPI):
     # ==========================================================================
     # AccountPool Initialization (Multi-account / Queue mode)
     # ==========================================================================
-    if KIRO_MULTI_CREDS_DIR:
+    # Respect gateway.yml multi_creds_dir override over .env KIRO_MULTI_CREDS_DIR
+    yml_multi_dir = admin_config.get_multi_creds_dir()
+    effective_multi_dir = yml_multi_dir or KIRO_MULTI_CREDS_DIR
+    disabled_accounts = admin_config.get_disabled_accounts()
+    
+    eff_profile = admin_config.get("accounts", "profile_arn") or PROFILE_ARN
+    eff_region = admin_config.get("accounts", "region") or REGION
+    eff_rt = admin_config.get("accounts", "refresh_token") or REFRESH_TOKEN
+    eff_creds = admin_config.get("accounts", "kiro_creds_file") or KIRO_CREDS_FILE
+    eff_db = admin_config.get("accounts", "kiro_cli_db_file") or KIRO_CLI_DB_FILE
+
+    if effective_multi_dir:
         # Multi-account mode: load accounts from directory
-        logger.info(f"Multi-account mode: loading from {KIRO_MULTI_CREDS_DIR}")
+        logger.info(f"Multi-account mode: loading from {effective_multi_dir}")
         account_pool = AccountPool.from_directory(
-            directory=KIRO_MULTI_CREDS_DIR,
-            profile_arn=PROFILE_ARN,
-            region=REGION,
+            directory=effective_multi_dir,
+            profile_arn=eff_profile,
+            region=eff_region,
         )
-        account_pool._quota_check_interval = QUOTA_CHECK_INTERVAL
+        account_pool._quota_check_interval = effective_quota_interval
+        # Apply disabled accounts from gateway.yml
+        for name in disabled_accounts:
+            slot = account_pool.get_slot_by_name(name)
+            if slot:
+                slot.is_disabled = True
+                logger.info(f"Account '{name}' loaded as disabled (from gateway.yml)")
     else:
         # Single-account mode: create pool with one account
         # Priority: SQLite DB > JSON file > environment variables
         auth_manager = KiroAuthManager(
-            refresh_token=REFRESH_TOKEN,
-            profile_arn=PROFILE_ARN,
-            region=REGION,
-            creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
-            sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
+            refresh_token=eff_rt,
+            profile_arn=eff_profile,
+            region=eff_region,
+            creds_file=eff_creds if eff_creds else None,
+            sqlite_db=eff_db if eff_db else None,
         )
         account_pool = AccountPool.from_single(auth_manager)
     
@@ -387,8 +469,8 @@ async def lifespan(app: FastAPI):
     
     logger.info(
         f"Account pool ready: {account_pool.size} account(s), "
-        f"queue timeout={QUEUE_TIMEOUT}s, "
-        f"quota check interval={QUOTA_CHECK_INTERVAL}s"
+        f"queue timeout={effective_queue_timeout}s, "
+        f"quota check interval={effective_quota_interval}s"
     )
     
     # ==========================================================================
@@ -523,6 +605,14 @@ app.include_router(openai_router)
 
 # Anthropic-compatible API: /v1/messages
 app.include_router(anthropic_router)
+
+# Admin UI and management API: /admin/*
+app.include_router(admin_router)
+
+# Serve static assets for admin UI (/admin-static/...)
+_static_dir = Path(__file__).parent / "kiro" / "static"
+_static_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/admin-static", StaticFiles(directory=str(_static_dir)), name="admin-static")
 
 
 # --- Uvicorn log config ---

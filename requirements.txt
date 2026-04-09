@@ -6,6 +6,8 @@ loguru
 python-dotenv
 tiktoken
 cbor2
+pyyaml
+python-multipart
 
 # Testing dependencies
 pytest

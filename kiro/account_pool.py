@@ -74,6 +74,7 @@ class AccountSlot:
         total_requests: Counter of total requests served (for monitoring)
         cooldown_until: Unix timestamp when cooldown expires (0 = not cooling)
         is_exhausted: Whether this account's quota is used up
+        is_disabled: Whether this account has been manually disabled via Admin UI
         quota_info: Latest quota info from Kiro Web Portal API
     """
 
@@ -84,7 +85,9 @@ class AccountSlot:
     total_requests: int = 0
     cooldown_until: float = 0.0
     is_exhausted: bool = False
+    is_disabled: bool = False
     quota_info: Optional[QuotaInfo] = None
+    _in_queue: bool = False  # Internal flag to prevent duplicates
 
     @property
     def is_cooling_down(self) -> bool:
@@ -112,11 +115,12 @@ class AccountSlot:
     def __repr__(self) -> str:
         cooldown_str = f", cooldown={self.cooldown_remaining:.0f}s" if self.is_cooling_down else ""
         exhausted_str = ", EXHAUSTED" if self.is_exhausted else ""
+        disabled_str = ", DISABLED" if self.is_disabled else ""
         quota_str = f", quota={self.quota_summary}" if self.quota_info else ""
         return (
             f"AccountSlot(name={self.name!r}, "
             f"active={self.active_requests}, "
-            f"total={self.total_requests}{quota_str}{cooldown_str}{exhausted_str})"
+            f"total={self.total_requests}{quota_str}{cooldown_str}{exhausted_str}{disabled_str})"
         )
 
 
@@ -158,7 +162,9 @@ class AccountPool:
 
         # Pre-populate queue with all available slots
         for slot in self._slots:
-            self._queue.put_nowait(slot)
+            if not slot.is_exhausted and not slot.is_disabled:
+                slot._in_queue = True
+                self._queue.put_nowait(slot)
 
         logger.info(
             f"AccountPool initialized: {len(self._slots)} account(s), "
@@ -180,15 +186,12 @@ class AccountPool:
 
     @property
     def available_count(self) -> int:
-        """Number of currently available (idle) account slots."""
-        return self._queue.qsize()
+        """Number of currently available (idle and enabled) account slots."""
+        return sum(1 for slot in self._slots if slot._in_queue and not slot.is_disabled and not slot.is_exhausted)
 
     @property
     def busy_count(self) -> int:
         """Number of currently busy account slots."""
-        # Busy = Total - Available - CoolingDown - Exhausted
-        # But qsize() only includes idle slots.
-        # So Busy = slots that have active_requests > 0
         return sum(1 for slot in self._slots if slot.active_requests > 0)
 
     @property
@@ -236,6 +239,7 @@ class AccountPool:
                 slot = await asyncio.wait_for(
                     self._queue.get(), timeout=remaining_timeout
                 )
+                slot._in_queue = False
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
@@ -253,6 +257,12 @@ class AccountPool:
                     f"({slot.email}, quota: {slot.quota_summary})"
                 )
                 # Don't put it back - it's permanently out
+                continue
+
+            # If slot was disabled via Admin UI, skip it
+            if slot.is_disabled:
+                logger.debug(f"Skipping disabled account '{slot.name}'")
+                # Don't put it back - will be re-added when enabled
                 continue
 
             # Slot is good, mark as active
@@ -412,6 +422,12 @@ class AccountPool:
             asyncio.create_task(self._delayed_release(slot, cooldown_seconds))
         else:
             # Immediate release - put slot back in queue
+            # Check if it was disabled/exhausted while busy
+            if slot.is_disabled or slot.is_exhausted:
+                logger.info(f"Account '{slot.name}' was disabled/exhausted while busy, not returning to pool")
+                return
+
+            slot._in_queue = True
             await self._queue.put(slot)
             logger.info(
                 f"Account released: {slot.name} "
@@ -429,6 +445,13 @@ class AccountPool:
         try:
             await asyncio.sleep(delay)
             slot.cooldown_until = 0.0  # Clear cooldown
+            
+            # Check if it was disabled/exhausted while cooling
+            if slot.is_disabled or slot.is_exhausted:
+                logger.info(f"Account '{slot.name}' was disabled/exhausted while cooling, not returning to pool")
+                return
+
+            slot._in_queue = True
             await self._queue.put(slot)
             logger.info(
                 f"Account '{slot.name}' cooldown expired, back in pool "
@@ -437,7 +460,9 @@ class AccountPool:
         except asyncio.CancelledError:
             # If task is cancelled (e.g., server shutdown), put slot back immediately
             slot.cooldown_until = 0.0
-            await self._queue.put(slot)
+            if not slot.is_disabled and not slot.is_exhausted:
+                slot._in_queue = True
+                await self._queue.put(slot)
             logger.debug(f"Cooldown cancelled for '{slot.name}', slot returned to pool")
 
     def get_status(self) -> dict:
@@ -451,17 +476,21 @@ class AccountPool:
             - busy: Number of active accounts
             - cooling_down: Number of accounts in cooldown
             - exhausted: Number of accounts out of quota
+            - disabled: Number of manually disabled accounts
             - accounts: Per-account status details with quota info
         """
         accounts_status = []
         cooling_count = 0
         exhausted_count = 0
+        disabled_count = 0
         for slot in self._slots:
             is_cooling = slot.is_cooling_down
             if is_cooling:
                 cooling_count += 1
             if slot.is_exhausted:
                 exhausted_count += 1
+            if slot.is_disabled:
+                disabled_count += 1
 
             account_info: dict = {
                 "name": slot.name,
@@ -469,6 +498,7 @@ class AccountPool:
                 "active_requests": slot.active_requests,
                 "total_requests": slot.total_requests,
                 "is_exhausted": slot.is_exhausted,
+                "is_disabled": slot.is_disabled,
             }
             # Quota details
             if slot.quota_info:
@@ -490,8 +520,178 @@ class AccountPool:
             "busy": self.busy_count,
             "cooling_down": cooling_count,
             "exhausted": exhausted_count,
+            "disabled": disabled_count,
             "accounts": accounts_status,
         }
+
+    # ------------------------------------------------------------------
+    # Dynamic slot management (Admin UI)
+    # ------------------------------------------------------------------
+
+    def get_slot_by_name(self, name: str) -> Optional[AccountSlot]:
+        """
+        Find an account slot by its name.
+
+        Args:
+            name: Account directory name (e.g. "account-1")
+
+        Returns:
+            AccountSlot if found, None otherwise
+        """
+        for slot in self._slots:
+            if slot.name == name:
+                return slot
+        return None
+
+    async def add_slot(self, slot: AccountSlot) -> None:
+        """
+        Hot-add a new account slot to the pool.
+
+        The slot is immediately available for incoming requests.
+        Does nothing if a slot with the same name already exists.
+
+        Args:
+            slot: The AccountSlot to add
+        """
+        existing = self.get_slot_by_name(slot.name)
+        if existing is not None:
+            logger.warning(f"Slot '{slot.name}' already exists in pool, skipping add")
+            return
+
+        self._slots.append(slot)
+        if not slot.is_exhausted and not slot.is_disabled and not slot._in_queue:
+            slot._in_queue = True
+            await self._queue.put(slot)
+        logger.info(
+            f"Account slot added: '{slot.name}' "
+            f"(pool size: {self.size}, available: {self.available_count})"
+        )
+
+    async def remove_slot(self, name: str) -> bool:
+        """
+        Remove an account slot from the pool.
+
+        The slot is marked as exhausted so the queue will naturally
+        skip it on next dequeue. The slot is removed from self._slots.
+
+        Safe to call while the slot may be in the asyncio.Queue —
+        marking is_exhausted ensures the acquire() loop skips it.
+
+        Args:
+            name: Account directory name to remove
+
+        Returns:
+            True if removed, False if slot not found or still active
+        """
+        slot = self.get_slot_by_name(name)
+        if slot is None:
+            logger.warning(f"Cannot remove slot '{name}': not found")
+            return False
+
+        if slot.active_requests > 0:
+            logger.warning(
+                f"Cannot remove slot '{name}': "
+                f"{slot.active_requests} active request(s) in progress"
+            )
+            return False
+
+        # Mark exhausted so acquire() skips it when it comes off the queue
+        slot.is_exhausted = True
+        slot.is_disabled = True
+        self._slots.remove(slot)
+        logger.info(f"Account slot removed: '{name}' (pool size: {self.size})")
+        return True
+
+    async def disable_slot(self, name: str) -> bool:
+        """
+        Disable an account slot so it is skipped by acquire().
+
+        The slot stays in self._slots but will not be put back in
+        the queue after being dequeued (acquire() discards disabled slots).
+        Active requests are not interrupted.
+
+        Args:
+            name: Account directory name to disable
+
+        Returns:
+            True if disabled, False if slot not found or already disabled
+        """
+        slot = self.get_slot_by_name(name)
+        if slot is None:
+            logger.warning(f"Cannot disable slot '{name}': not found")
+            return False
+
+        if slot.is_disabled:
+            logger.debug(f"Slot '{name}' is already disabled")
+            return False
+
+        slot.is_disabled = True
+        logger.info(f"Account slot disabled: '{name}'")
+        return True
+
+    async def enable_slot(self, name: str) -> bool:
+        """
+        Re-enable a previously disabled account slot.
+
+        The slot is re-inserted into the queue so it can serve requests.
+
+        Args:
+            name: Account directory name to enable
+
+        Returns:
+            True if enabled, False if slot not found or not disabled
+        """
+        slot = self.get_slot_by_name(name)
+        if slot is None:
+            logger.warning(f"Cannot enable slot '{name}': not found")
+            return False
+
+        if not slot.is_disabled:
+            logger.debug(f"Slot '{name}' is not disabled")
+            return False
+
+        slot.is_disabled = False
+        # Only re-queue if not also exhausted or actively cooling or already in queue
+        if not slot.is_exhausted and not slot.is_cooling_down and not slot._in_queue:
+            slot._in_queue = True
+            await self._queue.put(slot)
+        logger.info(
+            f"Account slot enabled: '{name}' "
+            f"(available: {self.available_count})"
+        )
+        return True
+
+    async def clear_cooldown(self, name: str) -> bool:
+        """
+        Immediately clear the cooldown for an account slot.
+
+        The slot is re-inserted into the queue so it can accept
+        requests immediately, bypassing the scheduled cooldown delay.
+
+        Args:
+            name: Account directory name
+
+        Returns:
+            True if cooldown was cleared, False if slot not found or not cooling
+        """
+        slot = self.get_slot_by_name(name)
+        if slot is None:
+            logger.warning(f"Cannot clear cooldown for '{name}': slot not found")
+            return False
+
+        if not slot.is_cooling_down:
+            logger.debug(f"Slot '{name}' is not in cooldown")
+            return False
+
+        slot.cooldown_until = 0.0
+        if not slot.is_exhausted and not slot.is_disabled and not slot._in_queue:
+            slot._in_queue = True
+            await self._queue.put(slot)
+        logger.info(
+            f"Cooldown cleared for '{name}' — slot immediately available "
+            f"(available: {self.available_count})"
+        )
+        return True
 
     @classmethod
     def from_single(cls, auth_manager: KiroAuthManager, name: str = "default") -> "AccountPool":
