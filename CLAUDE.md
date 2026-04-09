@@ -69,26 +69,58 @@ docker-compose up -d --build
 ### Request Flow
 
 1. **Entry Point** (`main.py`): FastAPI app initialization, route registration, middleware setup
-2. **Routes** (`routes_openai.py`, `routes_anthropic.py`): API endpoint handlers
-3. **Converters** (3-layer architecture):
+2. **Routes** (`routes_openai.py`, `routes_anthropic.py`, `routes_admin.py`): API endpoint handlers
+3. **Account Pool** (`account_pool.py`): Multi-account queue-based request management with quota checking
+4. **Converters** (3-layer architecture):
    - `converters_core.py`: Shared logic, unified message format (`UnifiedMessage`, `UnifiedTool`)
    - `converters_openai.py`: OpenAI Chat API → Kiro format
    - `converters_anthropic.py`: Anthropic Messages API → Kiro format
-4. **Authentication** (`auth.py`): Token lifecycle management, supports both Kiro Desktop Auth and AWS SSO OIDC
-5. **HTTP Client** (`http_client.py`): Retry logic, error handling, VPN/proxy support
-6. **Streaming** (3-layer architecture):
+5. **Authentication** (`auth.py`): Token lifecycle management, supports both Kiro Desktop Auth and AWS SSO OIDC
+6. **HTTP Client** (`http_client.py`): Retry logic, error handling, VPN/proxy support
+7. **Streaming** (3-layer architecture):
    - `streaming_core.py`: Shared streaming logic
    - `streaming_openai.py`: Kiro SSE → OpenAI streaming format
    - `streaming_anthropic.py`: Kiro SSE → Anthropic streaming format
-7. **Parsers** (`parsers.py`): AWS SSE event stream parsing, JSON truncation diagnostics
+8. **Parsers** (`parsers.py`): AWS SSE event stream parsing, JSON truncation diagnostics
+9. **Admin System**:
+   - `admin_config.py`: Hot-reload configuration via `gateway.yml`
+   - `log_broadcaster.py`: Real-time log streaming via SSE
+   - `quota_checker.py`: Proactive quota monitoring via Kiro Web Portal API
 
 ### Key Components
+
+**AccountPool** (`account_pool.py`):
+- Multi-account queue-based request management
+- Each account serialized (concurrency=1) to avoid 429 rate limiting
+- Total concurrency = number of accounts
+- Proactive quota checking via Kiro Web Portal API
+- Automatic cooldown on rate limit (429) responses
+- Hot-add/remove accounts without restart
+- Account switching: copy credentials to host cache directory
 
 **KiroAuthManager** (`auth.py`):
 - Manages access token lifecycle with automatic refresh
 - Supports 4 authentication methods: .env variables, JSON credentials file, AWS SSO, kiro-cli SQLite database
 - Thread-safe token refresh using asyncio.Lock
 - Detects auth type automatically (Kiro Desktop vs AWS SSO OIDC)
+
+**AdminConfig** (`admin_config.py`):
+- Hot-reload configuration via `gateway.yml`
+- Overrides .env settings without restart
+- Supports pool, timeout, reasoning, logging, and account settings
+- Persists disabled account list
+
+**LogBroadcaster** (`log_broadcaster.py`):
+- Real-time log streaming via SSE
+- Ring-buffer history (default 200 entries, configurable)
+- Multiple concurrent subscribers
+- Integrates with loguru as a sink
+
+**QuotaChecker** (`quota_checker.py`):
+- Queries Kiro Web Portal API for account quota
+- Returns usage, limit, plan, and next reset time
+- Marks accounts as exhausted when quota reached
+- Background refresh at configurable intervals
 
 **ModelResolver** (`model_resolver.py`):
 - Dynamic model resolution system
@@ -123,6 +155,15 @@ All configuration is centralized in `config.py`:
 - Type-safe access to settings
 - Constants for API URLs, timeouts, model mappings
 - Special handling for Windows paths (avoids escape sequence issues)
+
+**Hot-reload via gateway.yml**:
+- `gateway.yml` overrides `.env` settings without restart
+- Supports pool settings (cooldown, queue timeout, quota check interval)
+- Timeout configuration (first token, streaming read timeout)
+- Reasoning settings (fake reasoning toggle, max tokens, handling mode)
+- Logging settings (level, debug mode, history size)
+- Account settings (multi_creds_dir, disabled accounts list)
+- Changes applied immediately via Admin API PATCH /admin/config
 
 ### Testing Philosophy
 
@@ -182,17 +223,45 @@ The gateway preserves the user's original intent and request structure. Modifica
 - **CONTRIBUTING.md**: Contribution guidelines and standards
 - **tests/README.md**: Testing philosophy, structure, and commands
 - **.env.example**: Template for environment configuration
+- **gateway.yml**: Hot-reload configuration file (overrides .env without restart)
+- **kiro/static/**: Admin dashboard UI files (admin.html, admin.css, admin.js)
 
 ## Authentication Methods
 
-The gateway supports 4 authentication methods (auto-detected):
+The gateway supports 5 authentication methods (auto-detected):
 
-1. **Environment variables** (`.env` file): `REFRESH_TOKEN`, `PROFILE_ARN`, `KIRO_REGION`
+1. **Multi-account directory** (highest priority): `KIRO_MULTI_CREDS_DIR` pointing to a directory with account subdirectories
 2. **JSON credentials file**: `KIRO_CREDS_FILE` pointing to Kiro IDE credentials
-3. **AWS SSO**: Automatic detection via `clientId`/`clientSecret` in credentials file
-4. **kiro-cli SQLite database**: `KIRO_CLI_DB_FILE` pointing to `~/.local/share/kiro-cli/data.sqlite3`
+3. **kiro-cli SQLite database**: `KIRO_CLI_DB_FILE` pointing to `~/.local/share/kiro-cli/data.sqlite3`
+4. **AWS SSO**: Automatic detection via `clientId`/`clientSecret` in credentials file
+5. **Environment variables** (`.env` file): `REFRESH_TOKEN`, `PROFILE_ARN`, `KIRO_REGION`
 
 Authentication type is detected automatically in `KiroAuthManager` based on available credentials.
+
+### Multi-Account Pool
+
+When `KIRO_MULTI_CREDS_DIR` is configured, the gateway operates in multi-account mode:
+
+**Directory structure**:
+```
+kiro-accounts/
+  account-1/
+    kiro-auth-token.json          (required)
+    {clientIdHash}.json           (optional, for Enterprise SSO)
+  account-2/
+    kiro-auth-token.json
+    {clientIdHash}.json
+```
+
+**Features**:
+- Queue-based fair scheduling across accounts
+- Each account handles one request at a time (prevents 429 rate limiting)
+- Total concurrency = number of accounts
+- Proactive quota checking (configurable interval, default 5 minutes)
+- Automatic cooldown on 429 responses
+- Hot-add/remove accounts via Admin API
+- Disable/enable accounts without restart
+- Account switching: copy credentials to host cache directory (requires `KIRO_HOST_CACHE_DIR` volume mapping)
 
 ## VPN/Proxy Support
 
@@ -206,6 +275,21 @@ VPN_PROXY_URL=http://user:password@proxy.company.com:8080
 
 Supports HTTP, HTTPS, and SOCKS5 protocols with optional authentication.
 
+**Implementation**: Proxy is configured globally via environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) before any httpx clients are created. Localhost is automatically excluded from proxy routing.
+
+## Host Account Switching
+
+The gateway supports switching the active Kiro account on the host machine (where Kiro IDE/CLI runs):
+
+**Setup**:
+1. Configure `KIRO_HOST_CACHE_DIR` in `.env` (e.g., `~/.aws/sso/cache`)
+2. Mount this directory as a Docker volume: `~/.aws/sso/cache:/app/host_aws_cache:rw`
+3. Use Admin UI "Switch" button or `POST /admin/accounts/{name}/switch` endpoint
+
+**How it works**: Copies account credentials from the pool to the host cache directory, allowing Kiro IDE/CLI to use that account immediately without manual file copying.
+
+**Use case**: Quickly test different accounts in your local IDE without manually swapping credential files.
+
 ## Debug Logging
 
 Debug logging is disabled by default. Enable in `.env`:
@@ -216,3 +300,38 @@ DEBUG_MODE=all     # Save logs for every request
 ```
 
 Debug files are saved to `debug_logs/` directory with request/response details.
+
+## Admin Dashboard
+
+The gateway includes a modern web-based admin dashboard at `/admin`:
+
+**Features**:
+- Real-time account pool status monitoring
+- Per-account quota display (used/limit, plan, next reset)
+- Active/busy/exhausted/disabled account indicators
+- Account management: add, remove, disable, enable accounts
+- Bulk quota refresh for all accounts
+- Manual cooldown clearing
+- Account switching (copy credentials to host)
+- Download account credential files
+- Hot-reload configuration editor (gateway.yml)
+- Real-time log streaming via SSE
+- Statistics cards with hover effects
+
+**Security**: All admin endpoints require `X-Admin-Key` header matching `PROXY_API_KEY`.
+
+**Admin API Endpoints**:
+- `GET /admin/status` - Pool status with quota info
+- `POST /admin/accounts` - Add new account (upload credentials)
+- `POST /admin/accounts/{name}/quota-refresh` - Refresh single account quota
+- `POST /admin/accounts/quota-refresh-all` - Bulk refresh all quotas
+- `POST /admin/accounts/{name}/cooldown-clear` - Clear cooldown
+- `POST /admin/accounts/{name}/disable` - Disable account
+- `POST /admin/accounts/{name}/enable` - Enable account
+- `POST /admin/accounts/{name}/switch` - Switch host to this account
+- `DELETE /admin/accounts/{name}` - Delete account
+- `GET /admin/accounts/{name}/files` - List credential files
+- `GET /admin/accounts/{name}/files/{filename}` - Download credential file
+- `GET /admin/config` - Get current configuration
+- `PATCH /admin/config` - Update configuration (hot-reload)
+- `GET /admin/logs/stream` - Real-time log stream (SSE)

@@ -40,6 +40,7 @@ Priority: CLI args > Environment variables > Default values
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 import os
@@ -474,13 +475,13 @@ async def lifespan(app: FastAPI):
     )
     
     # ==========================================================================
-    # Quota Initialization (proactive quota check at startup)
+    # Quota Initialization (proactive quota check in background)
     # ==========================================================================
     if QUOTA_CHECK_INTERVAL > 0:
-        try:
-            await account_pool.initialize_quota()
-        except Exception as e:
-            logger.warning(f"Quota initialization failed (non-fatal): {e}")
+        # Start quota initialization as a background task so it doesn't block startup
+        # This is especially important for multi-account setups where checks can be slow
+        asyncio.create_task(account_pool.initialize_quota())
+        logger.info("Quota initialization started in background")
     else:
         logger.info("Quota checking disabled (QUOTA_CHECK_INTERVAL=0)")
     

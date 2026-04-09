@@ -1051,8 +1051,6 @@ async def _reinit_pool(request: Request) -> None:
     request.app.state.account_pool = new_pool
     request.app.state.auth_manager = new_pool.slots[0].auth_manager
 
-    # Initial quota check
-    try:
-        await new_pool.initialize_quota()
-    except Exception as exc:
-        logger.warning(f"Quota init after pool reinit failed (non-fatal): {exc}")
+    # Initial quota check in background
+    asyncio.create_task(new_pool.initialize_quota())
+    logger.info("Account pool reinitialized, quota check started in background")

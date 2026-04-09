@@ -390,45 +390,37 @@ class AccountPool:
         except Exception as e:
             logger.warning(f"Unexpected error checking quota for '{slot.name}': {e}")
 
-    async def initialize_quota(self) -> None:
+    async def initialize_quota(self, concurrency: int = 5) -> None:
         """
-        Query quota for all accounts during startup.
+        Query quota for all accounts proactively.
 
-        This is called once when the server starts to get initial quota info.
-        Accounts that are found to be exhausted are removed from the pool.
-        Failures are logged but don't prevent the server from starting.
+        Uses a semaphore to limit concurrent network requests during startup or refresh,
+        preventing system/network overload. This is designed to be safe for 
+        background execution.
         """
-        logger.info("Checking quota for all accounts...")
+        logger.info(f"Starting proactive quota check for {len(self._slots)} accounts (concurrency={concurrency})...")
 
-        # Check all slots concurrently
-        tasks = [self._check_slot_quota(slot) for slot in self._slots]
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _check_with_sem(slot: AccountSlot):
+            async with sem:
+                await self._check_slot_quota(slot)
+
+        # Check all slots concurrently with limited parallelism
+        tasks = [_check_with_sem(slot) for slot in self._slots]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Remove exhausted slots from queue
-        # Since we can't remove from asyncio.Queue, we rebuild it
-        exhausted_names = [s.name for s in self._slots if s.is_exhausted]
-        if exhausted_names:
-            # Drain the queue and re-add only non-exhausted slots
-            remaining_slots = []
-            while not self._queue.empty():
-                try:
-                    s = self._queue.get_nowait()
-                    if not s.is_exhausted:
-                        remaining_slots.append(s)
-                except asyncio.QueueEmpty:
-                    break
-            for s in remaining_slots:
-                self._queue.put_nowait(s)
+        active_count = sum(1 for s in self._slots if not s.is_exhausted)
+        exhausted_count = len(self._slots) - active_count
 
+        if exhausted_count > 0:
             logger.warning(
-                f"Removed {len(exhausted_names)} exhausted account(s) from pool: "
-                f"{', '.join(exhausted_names)}"
+                f"Proactive quota check finished: {exhausted_count} exhausted account(s) detected. "
+                f"These will be skipped during request acquisition."
             )
 
-        active_count = sum(1 for s in self._slots if not s.is_exhausted)
         logger.info(
-            f"Quota initialization complete: "
-            f"{active_count}/{len(self._slots)} account(s) active"
+            f"Quota initialization finished: {active_count}/{len(self._slots)} account(s) active"
         )
 
     async def release(
