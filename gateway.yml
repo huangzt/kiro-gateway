@@ -11,16 +11,16 @@ accounts:
   refresh_token: null
   region: null
 logging:
-  debug_mode: all
+  debug_mode: null
   log_history_size: null
-  log_level: WARNING
+  log_level: null
 pool:
   cooldown_seconds: null
   queue_timeout: null
   quota_check_interval: null
 reasoning:
-  fake_reasoning: 'false'
-  fake_reasoning_handling: as_reasoning_content
+  fake_reasoning: false
+  fake_reasoning_handling: null
   fake_reasoning_max_tokens: null
 timeout:
   first_token_max_retries: null
