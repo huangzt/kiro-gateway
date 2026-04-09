@@ -745,8 +745,8 @@ function appendLog(entry) {
   const stream = document.getElementById('log-stream');
   stream.appendChild(div);
 
-  // Keep max 2000 DOM entries
-  while (stream.children.length > 2000) stream.removeChild(stream.firstChild);
+  // Keep max 200 DOM entries
+  while (stream.children.length > 200) stream.removeChild(stream.firstChild);
 
   logCount++;
   document.getElementById('log-count').textContent = stream.children.length + ' 条';
