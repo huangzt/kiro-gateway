@@ -18,7 +18,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-Log broadcaster for SSE streaming.
+Log broadcaster for SSE streaming with admin log filtering.
 
 Maintains a ring buffer of recent log entries and distributes them
 to connected SSE clients. Registered as a loguru sink at startup.
@@ -26,9 +26,25 @@ to connected SSE clients. Registered as a loguru sink at startup.
 Architecture:
     - LogBroadcaster acts as a loguru sink (write method)
     - Each log entry is stored in a deque ring buffer
+    - Admin route logs are filtered from SSE streams (but kept in history)
     - SSE clients subscribe() to get (queue, history_snapshot)
     - New entries are fan-out pushed to all subscriber queues
     - Clients unsubscribe() when they disconnect
+
+Admin Log Filtering:
+    The following logs are filtered from SSE streams to reduce noise:
+    - Admin route access logs (GET /admin/status, POST /admin/accounts, etc.)
+    - Admin UI static file requests (/admin-static/*, admin.html)
+    - Admin module INFO/DEBUG logs (kiro.routes_admin)
+    - Successful admin authentication checks
+
+    The following logs are NOT filtered (important for monitoring):
+    - ERROR and WARNING level logs from admin routes
+    - Authentication failures (security relevant)
+    - All non-admin API logs (v1/models, v1/chat/completions, etc.)
+
+    Note: Filtered logs are still stored in the full history buffer
+    for debugging and audit purposes.
 
 Usage:
     broadcaster = LogBroadcaster(history_size=200)
@@ -108,20 +124,93 @@ class LogBroadcaster:
             "line": record["line"],
         }
 
-        # Add to ring buffer
+        # Filter out admin route logs from frontend streaming
+        # Admin logs are still stored in history but not pushed to SSE clients
+        should_broadcast = not self._is_admin_log(entry)
+
+        # Add to ring buffer (always store, regardless of broadcast filter)
         self._history.append(entry)
 
         # Fan-out broadcast to all subscriber queues (non-blocking)
-        dead_queues: Set[asyncio.Queue] = set()
-        for q in self._queues:
-            try:
-                q.put_nowait(entry)
-            except (asyncio.QueueFull, Exception):
-                dead_queues.add(q)
+        # Skip broadcasting for admin logs
+        if should_broadcast:
+            dead_queues: Set[asyncio.Queue] = set()
+            for q in self._queues:
+                try:
+                    q.put_nowait(entry)
+                except (asyncio.QueueFull, Exception):
+                    dead_queues.add(q)
 
-        # Prune dead/full queues
-        if dead_queues:
-            self._queues -= dead_queues
+            # Prune dead/full queues
+            if dead_queues:
+                self._queues -= dead_queues
+
+    # ------------------------------------------------------------------
+    # Admin log filtering
+    # ------------------------------------------------------------------
+
+    def _is_admin_log(self, entry: Dict) -> bool:
+        """
+        Check if a log entry is related to admin routes and should be filtered.
+
+        Filters out logs from:
+        - Admin route handlers (GET /admin/status, POST /admin/accounts, etc.)
+        - Admin UI static file serving
+        - Admin authentication checks
+
+        Args:
+            entry: Log entry dictionary with message, module, function, etc.
+
+        Returns:
+            True if this is an admin log that should be filtered from SSE stream
+        """
+        message = entry.get("message", "").lower()
+        module = entry.get("module", "")
+        function = entry.get("function", "")
+
+        # Filter admin route access logs (uvicorn format and direct paths)
+        admin_patterns = [
+            "get /admin/status",
+            "post /admin/accounts",
+            "delete /admin/accounts",
+            "get /admin/config",
+            "patch /admin/config",
+            "get /admin/logs/stream",
+            "/admin/accounts/",  # Covers all account-specific endpoints
+            "quota-refresh",
+            "cooldown-clear",
+            "disable",
+            "enable",
+            "switch",
+            '"get /admin',        # Uvicorn format: "GET /admin HTTP/1.1"
+            '"post /admin',       # Uvicorn format: "POST /admin/... HTTP/1.1"
+            '"delete /admin',     # Uvicorn format: "DELETE /admin/... HTTP/1.1"
+            '"patch /admin',      # Uvicorn format: "PATCH /admin/... HTTP/1.1"
+        ]
+
+        # Check message content for admin route patterns
+        for pattern in admin_patterns:
+            if pattern in message:
+                return True
+
+        # Filter logs from admin route module
+        if module == "kiro.routes_admin":
+            # Allow error logs from admin routes to pass through
+            # Only filter INFO/DEBUG level routine operations
+            level = entry.get("level", "INFO")
+            if level in ["ERROR", "WARNING"]:
+                return False
+            return True
+
+        # Filter admin static file serving logs
+        if "/admin-static/" in message or "admin.html" in message:
+            return True
+
+        # Filter admin authentication logs (but allow auth failures)
+        if function == "verify_admin_key" and "invalid" not in message.lower():
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # SSE subscription API
@@ -132,16 +221,17 @@ class LogBroadcaster:
         Subscribe to the real-time log stream.
 
         Returns a dedicated queue for new log entries plus a snapshot
-        of the current history buffer. The caller should iterate the
-        history first, then drain the queue.
+        of the current history buffer with admin logs filtered out.
+        The caller should iterate the history first, then drain the queue.
 
         Returns:
             Tuple of:
-                - asyncio.Queue: Receives new log entries (Dict)
-                - List[Dict]: Snapshot of current history (chronological)
+                - asyncio.Queue: Receives new log entries (Dict) - admin logs filtered
+                - List[Dict]: Snapshot of current history (chronological) - admin logs filtered
         """
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
-        history = list(self._history)
+        # Filter admin logs from history snapshot
+        history = [entry for entry in self._history if not self._is_admin_log(entry)]
         async with self._lock:
             self._queues.add(q)
         return q, history
