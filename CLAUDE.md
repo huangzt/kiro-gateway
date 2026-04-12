@@ -335,3 +335,171 @@ The gateway includes a modern web-based admin dashboard at `/admin`:
 - `GET /admin/config` - Get current configuration
 - `PATCH /admin/config` - Update configuration (hot-reload)
 - `GET /admin/logs/stream` - Real-time log stream (SSE)
+
+### Frontend Architecture
+
+**Tech Stack**:
+- Vanilla JavaScript (no framework dependencies)
+- Server-Sent Events (SSE) for real-time log streaming
+- LocalStorage for API key persistence
+- Responsive design with mobile drawer navigation
+
+**File Structure**:
+- `kiro/static/admin.html` - Single-page application shell with login screen, dashboard, config editor, and log viewer
+- `kiro/static/admin.css` - Dark theme styling with CSS custom properties, responsive breakpoints, and animations
+- `kiro/static/admin.js` - Client-side logic (~927 lines) handling API calls, SSE connections, and UI state management
+- `kiro/static/favicon.svg` - Admin dashboard icon
+
+**Key Frontend Components**:
+
+1. **Authentication Flow**:
+   - Login screen with API key input (stored in localStorage as `kiro_admin_key`)
+   - Auto-login on page load if key exists
+   - All API requests include `X-Admin-Key` header
+   - 401 responses trigger automatic logout
+
+2. **Dashboard Tab** (`#pane-dashboard`):
+   - Statistics cards showing total/active/cooling/exhausted/disabled accounts and total remaining quota
+   - Account grid with per-account cards displaying:
+     - Status badges (Active/Cooling/Exhausted/Disabled)
+     - Quota progress bar with usage percentage
+     - Trial expiry countdown (if applicable)
+     - Active request count and total request count
+     - Action buttons: Refresh, Enable/Disable, Delete, Switch (host account)
+   - Auto-refresh every 60 seconds when dashboard is active
+   - Empty state with "Add Account" prompt
+
+3. **Config Tab** (`#pane-config`):
+   - Hot-reload configuration editor for `gateway.yml`
+   - Grouped settings: Pool, Timeout, Reasoning, Logging, Accounts
+   - Static environment variables display (read-only)
+   - Draft system: changes tracked in `configDraft` object, only modified values sent to backend
+   - Save button with status indicator
+
+4. **Logs Tab** (`#pane-logs`):
+   - Real-time log streaming via SSE (`/admin/logs/stream`)
+   - Level filter buttons (DEBUG/INFO/WARNING/ERROR)
+   - Keyword search filter
+   - Pause/resume streaming
+   - Auto-scroll toggle
+   - Log count display
+   - Connection status indicator (connecting/connected/disconnected)
+   - Clear screen button
+
+5. **Add Account Modal**:
+   - Drag-and-drop file upload for credentials
+   - Two file inputs: `kiro-auth-token.json` (required) and `{hash}.json` (Enterprise SSO, required)
+   - Validates file selection before submission
+   - Uploads via multipart/form-data to `POST /admin/accounts`
+
+6. **Confirmation Modal**:
+   - Generic confirmation dialog for destructive actions (delete account)
+   - Customizable icon, title, and message
+   - Promise-based API for async confirmation
+
+7. **Mobile Responsive**:
+   - Hamburger menu toggle for mobile devices
+   - Slide-out drawer navigation
+   - Touch-friendly button sizes
+   - Responsive grid layouts
+
+**State Management**:
+- `apiKey` - Admin API key (persisted in localStorage)
+- `autoRefreshTimer` - Dashboard auto-refresh interval (60s)
+- `sseAbortController` - SSE connection lifecycle management
+- `paused` - Log streaming pause state
+- `autoScroll` - Log auto-scroll toggle
+- `activeLevels` - Set of visible log levels
+- `configDraft` - Pending configuration changes (section → key → value)
+- `logCount` - Total log entries displayed
+
+**API Helper** (`apiFetch`):
+- Wrapper around `fetch()` that automatically adds `X-Admin-Key` header
+- Handles JSON content-type for body requests
+- Used by all API calls for consistent authentication
+
+**SSE Connection Management**:
+- `startSSE()` - Establishes SSE connection to `/admin/logs/stream`
+- `stopSSE()` - Aborts SSE connection and cleans up
+- Automatic reconnection on disconnect (with exponential backoff)
+- Filters logs by level and keyword in real-time
+- Appends logs to DOM with syntax highlighting for JSON payloads
+
+**Toast Notifications**:
+- Non-blocking notifications for success/error/warning messages
+- Auto-dismiss after 3 seconds
+- Stacked display for multiple toasts
+
+**Utility Functions**:
+- `escHtml()` - HTML entity escaping for XSS prevention
+- `escAttr()` - Attribute value escaping
+- `formatBytes()` - Human-readable byte formatting
+- `formatDuration()` - Human-readable duration formatting
+
+### Backend-Frontend Integration
+
+**Routes** (`kiro/routes_admin.py`):
+- All admin routes are prefixed with `/admin`
+- Static file serving for admin UI assets via `/admin-static/` prefix
+- Security: `verify_admin_key()` dependency checks `X-Admin-Key` header on all endpoints
+- Sensitive config values (tokens, paths) replaced with `***` in API responses
+
+**Data Flow**:
+1. Frontend calls API endpoint with `X-Admin-Key` header
+2. Backend validates key via `verify_admin_key()` dependency
+3. Backend performs operation (account management, config update, etc.)
+4. Backend returns JSON response with operation result
+5. Frontend updates UI and shows toast notification
+
+**SSE Log Streaming**:
+1. Frontend opens SSE connection to `/admin/logs/stream`
+2. Backend registers client with `LogBroadcaster`
+3. `LogBroadcaster` sends historical logs (ring buffer) to new client
+4. `LogBroadcaster` broadcasts new logs to all connected clients in real-time
+5. Frontend filters and displays logs based on level/keyword filters
+6. Connection auto-reconnects on disconnect
+
+**Configuration Hot-Reload**:
+1. Frontend loads current config via `GET /admin/config`
+2. User modifies values in config editor
+3. Frontend tracks changes in `configDraft` object
+4. User clicks "Save" → `PATCH /admin/config` with only modified values
+5. Backend updates `AdminConfig` singleton and persists to `gateway.yml`
+6. Changes take effect immediately without restart
+
+**Account Management**:
+1. Add: Frontend uploads credential files → Backend creates account directory → `AccountPool` hot-adds account
+2. Delete: Frontend confirms → Backend removes account directory → `AccountPool` hot-removes account
+3. Disable/Enable: Frontend toggles → Backend updates `AdminConfig.disabled_accounts` → `AccountPool` marks account
+4. Switch: Frontend triggers → Backend copies credentials to `KIRO_HOST_CACHE_DIR` → Host IDE/CLI uses new account
+
+### Development Notes
+
+**Modifying Admin UI**:
+- Edit `admin.html`, `admin.css`, or `admin.js` in `kiro/static/`
+- No build step required (vanilla JS/CSS)
+- Refresh browser to see changes (cache-busting via version query param)
+- Test responsive design at mobile breakpoints (< 768px)
+
+**Adding New Config Options**:
+1. Add field to `AdminConfig` class in `admin_config.py`
+2. Add getter/setter methods with validation
+3. Update `GET /admin/config` endpoint to include new field
+4. Update `PATCH /admin/config` endpoint to handle new field
+5. Add input field to config editor in `admin.html`
+6. Update `loadConfig()` and `saveConfig()` in `admin.js`
+
+**Adding New Admin Endpoints**:
+1. Add route handler to `routes_admin.py` with `@router` decorator
+2. Add `verify_admin_key` dependency for authentication
+3. Implement business logic (call `AccountPool`, `AdminConfig`, etc.)
+4. Return JSON response with appropriate status code
+5. Add frontend API call in `admin.js`
+6. Update UI to display result
+
+**Debugging Admin UI**:
+- Open browser DevTools console for JavaScript errors
+- Check Network tab for failed API requests
+- Verify `X-Admin-Key` header is present in all requests
+- Check SSE connection status in Network tab (EventStream type)
+- Enable `DEBUG_MODE=all` in `.env` for verbose backend logging
