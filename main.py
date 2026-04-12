@@ -463,11 +463,20 @@ async def lifespan(app: FastAPI):
         account_pool = AccountPool.from_single(auth_manager)
     
     app.state.account_pool = account_pool
-    
+
     # For backward compatibility, expose the first auth_manager as app.state.auth_manager
     # This is used by /v1/models endpoint and other places that need a single auth_manager
-    app.state.auth_manager = account_pool.slots[0].auth_manager
-    
+    if account_pool.size > 0:
+        app.state.auth_manager = account_pool.slots[0].auth_manager
+    else:
+        # Empty pool: create a dummy auth_manager for /v1/models endpoint
+        # Actual requests will fail at acquire() with a clear error message
+        app.state.auth_manager = None
+        logger.warning(
+            "No accounts configured. /v1/models endpoint will return empty list. "
+            "Add accounts via Admin UI to start processing requests."
+        )
+
     logger.info(
         f"Account pool ready: {account_pool.size} account(s), "
         f"queue timeout={effective_queue_timeout}s, "
@@ -487,7 +496,7 @@ async def lifespan(app: FastAPI):
     
     # Create model cache
     app.state.model_cache = ModelInfoCache()
-    
+
     # BLOCKING: Load models from Kiro API at startup
     # This ensures the cache is populated BEFORE accepting any requests.
     # No race conditions - requests only start after yield.
@@ -495,6 +504,12 @@ async def lifespan(app: FastAPI):
     logger.info("Loading models from Kiro API...")
     try:
         first_auth = app.state.auth_manager
+
+        # Skip model fetching if no accounts configured
+        if first_auth is None:
+            logger.warning("No accounts configured. Using fallback models.")
+            raise Exception("No auth_manager available")
+
         token = await first_auth.get_access_token()
         from kiro.utils import get_kiro_headers
         from kiro.auth import AuthType
@@ -524,9 +539,12 @@ async def lifespan(app: FastAPI):
                 raise Exception(f"HTTP {response.status_code}")
     except Exception as e:
         # FALLBACK: Use built-in model list
-        logger.error(f"Failed to fetch models from Kiro API: {e}")
-        logger.error("Using pre-configured fallback models. Not all models may be available on your plan, or the list may be outdated.")
-        
+        if app.state.auth_manager is None:
+            logger.warning("No accounts configured. Using fallback models until accounts are added.")
+        else:
+            logger.error(f"Failed to fetch models from Kiro API: {e}")
+            logger.error("Using pre-configured fallback models. Not all models may be available on your plan, or the list may be outdated.")
+
         # Populate cache with fallback models
         await app.state.model_cache.update(FALLBACK_MODELS)
         logger.debug(f"Loaded {len(FALLBACK_MODELS)} fallback models")

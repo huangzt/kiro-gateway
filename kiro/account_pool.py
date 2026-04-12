@@ -202,16 +202,10 @@ class AccountPool:
         Initialize account pool with given slots.
 
         Args:
-            slots: List of AccountSlot instances
+            slots: List of AccountSlot instances (can be empty for multi-account mode)
             quota_check_interval: Seconds between quota checks per account.
                                   Default is 300 (5 minutes). Set to 0 to disable.
-
-        Raises:
-            ValueError: If slots list is empty
         """
-        if not slots:
-            raise ValueError("AccountPool requires at least one account slot")
-
         self._slots = slots
         self._queue: asyncio.Queue[AccountSlot] = asyncio.Queue()
         self._quota_check_interval = quota_check_interval
@@ -222,11 +216,17 @@ class AccountPool:
                 slot._in_queue = True
                 self._queue.put_nowait(slot)
 
-        logger.info(
-            f"AccountPool initialized: {len(self._slots)} account(s), "
-            f"max concurrency={len(self._slots)}, "
-            f"quota_check_interval={quota_check_interval:.0f}s"
-        )
+        if not slots:
+            logger.warning(
+                "AccountPool initialized with 0 accounts. "
+                "Add accounts via Admin UI to start processing requests."
+            )
+        else:
+            logger.info(
+                f"AccountPool initialized: {len(self._slots)} account(s), "
+                f"max concurrency={len(self._slots)}, "
+                f"quota_check_interval={quota_check_interval:.0f}s"
+            )
         for slot in self._slots:
             logger.debug(f"  Account slot: {slot.name}")
 
@@ -286,6 +286,9 @@ class AccountPool:
         while True:
             remaining_timeout = deadline - time.monotonic()
             if remaining_timeout <= 0:
+                if self.size == 0:
+                    logger.error("No accounts configured in the pool. Add accounts via Admin UI.")
+                    raise asyncio.TimeoutError("No accounts available")
                 logger.warning(
                     f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
                 )
@@ -297,6 +300,9 @@ class AccountPool:
                 )
                 slot._in_queue = False
             except asyncio.TimeoutError:
+                if self.size == 0:
+                    logger.error("No accounts configured in the pool. Add accounts via Admin UI.")
+                    raise asyncio.TimeoutError("No accounts available")
                 logger.warning(
                     f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
                 )
@@ -395,9 +401,13 @@ class AccountPool:
         Query quota for all accounts proactively.
 
         Uses a semaphore to limit concurrent network requests during startup or refresh,
-        preventing system/network overload. This is designed to be safe for 
+        preventing system/network overload. This is designed to be safe for
         background execution.
         """
+        if not self._slots:
+            logger.info("Skipping quota initialization: no accounts configured")
+            return
+
         logger.info(f"Starting proactive quota check for {len(self._slots)} accounts (concurrency={concurrency})...")
 
         sem = asyncio.Semaphore(concurrency)
@@ -885,8 +895,9 @@ class AccountPool:
         subdirs = sorted([d for d in dir_path.iterdir() if d.is_dir()])
 
         if not subdirs:
-            raise ValueError(
+            logger.warning(
                 f"No account subdirectories found in: {directory}\n"
+                f"Starting with empty account pool. Add accounts via Admin UI.\n"
                 f"Expected structure:\n"
                 f"  {directory}/\n"
                 f"    account-1/\n"
@@ -894,6 +905,8 @@ class AccountPool:
                 f"    account-2/\n"
                 f"      kiro-auth-token.json"
             )
+            # Return empty pool instead of raising error
+            return cls([])
 
         for subdir in subdirs:
             account_name = subdir.name
@@ -981,15 +994,18 @@ class AccountPool:
 
         if not slots:
             error_details = "\n".join(errors) if errors else "No subdirectories found"
-            raise ValueError(
+            logger.warning(
                 f"No valid accounts found in: {directory}\n"
                 f"Errors:\n{error_details}\n"
-                f"\nExpected structure:\n"
+                f"\nStarting with empty account pool. Add accounts via Admin UI.\n"
+                f"Expected structure:\n"
                 f"  {directory}/\n"
                 f"    account-1/\n"
                 f"      kiro-auth-token.json\n"
                 f"      {{clientIdHash}}.json  (optional)"
             )
+            # Return empty pool instead of raising error
+            return cls([])
 
         logger.info(
             f"Multi-account pool ready: {len(slots)} account(s) loaded "

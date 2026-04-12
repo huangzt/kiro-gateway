@@ -330,8 +330,12 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
     """
     Manually trigger quota refresh for all accounts in the pool.
 
-    This endpoint refreshes quota information for all accounts concurrently,
-    making it efficient for bulk operations.
+    This endpoint:
+    1. Rescans the multi-account directory for new accounts (if configured)
+    2. Refreshes quota information for all accounts concurrently
+
+    This allows users to add new account directories manually and have them
+    automatically discovered without restarting the server.
 
     Args:
         request: FastAPI request
@@ -345,6 +349,7 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
             "total": 5,
             "refreshed": 4,
             "failed": 1,
+            "new_accounts": 2,
             "results": [
                 {"account": "account-1", "success": true},
                 {"account": "account-2", "success": false, "error": "Network timeout"}
@@ -352,8 +357,81 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
         }
     """
     pool: AccountPool = request.app.state.account_pool
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
 
-    # Get all slots
+    new_accounts_count = 0
+
+    # Step 1: Rescan directory for new accounts (only in multi-account mode)
+    if multi_dir:
+        from pathlib import Path
+        import json
+        from kiro.auth import KiroAuthManager
+        from kiro.config import PROFILE_ARN, REGION
+
+        dir_path = Path(multi_dir).expanduser().resolve()
+        if dir_path.exists() and dir_path.is_dir():
+            # Get existing account names
+            existing_names = {slot.name for slot in pool.slots}
+
+            # Scan for new subdirectories
+            subdirs = sorted([d for d in dir_path.iterdir() if d.is_dir()])
+            for subdir in subdirs:
+                account_name = subdir.name
+
+                # Skip if already exists
+                if account_name in existing_names:
+                    continue
+
+                creds_file = subdir / "kiro-auth-token.json"
+                if not creds_file.exists():
+                    logger.debug(f"Skipping '{account_name}': missing kiro-auth-token.json")
+                    continue
+
+                # Validate credentials file
+                try:
+                    with open(creds_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+
+                    if "refreshToken" not in data and "accessToken" not in data:
+                        logger.debug(f"Skipping '{account_name}': no refreshToken or accessToken")
+                        continue
+
+                    # Handle Enterprise SSO device registration
+                    client_id_override = None
+                    client_secret_override = None
+                    if "clientIdHash" in data:
+                        device_reg_file = subdir / f"{data['clientIdHash']}.json"
+                        if device_reg_file.exists():
+                            try:
+                                with open(device_reg_file, "r", encoding="utf-8") as f:
+                                    device_data = json.load(f)
+                                client_id_override = device_data.get("clientId")
+                                client_secret_override = device_data.get("clientSecret")
+                            except Exception as e:
+                                logger.warning(f"Failed to load device registration for '{account_name}': {e}")
+
+                    # Create auth manager and slot
+                    auth_manager = KiroAuthManager(
+                        profile_arn=PROFILE_ARN if PROFILE_ARN else None,
+                        region=REGION,
+                        creds_file=str(creds_file),
+                        client_id=client_id_override,
+                        client_secret=client_secret_override,
+                    )
+
+                    slot = AccountSlot(name=account_name, auth_manager=auth_manager)
+
+                    # Add to pool
+                    pool.add_slot(slot)
+                    new_accounts_count += 1
+                    logger.info(f"Auto-discovered and added account: {account_name}")
+
+                except Exception as e:
+                    logger.warning(f"Failed to add account '{account_name}': {e}")
+                    continue
+
+    # Step 2: Refresh all quotas (including newly added accounts)
     all_slots = pool.slots
     if not all_slots:
         return JSONResponse(
@@ -362,6 +440,7 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
                 "total": 0,
                 "refreshed": 0,
                 "failed": 0,
+                "new_accounts": new_accounts_count,
                 "results": [],
             }
         )
@@ -396,6 +475,7 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
             "total": len(results),
             "refreshed": refreshed,
             "failed": failed,
+            "new_accounts": new_accounts_count,
             "results": results,
         }
     )
@@ -1063,7 +1143,13 @@ async def _reinit_pool(request: Request) -> None:
 
     # Swap the pool (old pool continues draining active requests)
     request.app.state.account_pool = new_pool
-    request.app.state.auth_manager = new_pool.slots[0].auth_manager
+
+    # Update auth_manager for backward compatibility
+    if new_pool.size > 0:
+        request.app.state.auth_manager = new_pool.slots[0].auth_manager
+    else:
+        request.app.state.auth_manager = None
+        logger.warning("Pool reloaded with 0 accounts. Add accounts to start processing requests.")
 
     # Initial quota check in background
     asyncio.create_task(new_pool.initialize_quota())

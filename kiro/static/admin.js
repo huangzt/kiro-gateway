@@ -341,14 +341,22 @@ async function refreshAllQuotas() {
       return;
     }
 
-    const { total, refreshed, failed } = data;
-    if (failed > 0) {
-      showToast(`刷新完成: ${refreshed}/${total} 成功，${failed} 失败`, 'warning');
-    } else {
-      showToast(`全部刷新成功 (${refreshed}/${total})`, 'success');
+    const { total, refreshed, failed, new_accounts = 0 } = data;
+    let message = '';
+
+    if (new_accounts > 0) {
+      message = `发现 ${new_accounts} 个新账号！`;
     }
 
-    // Reload dashboard to show updated quotas
+    if (failed > 0) {
+      message += (message ? ' ' : '') + `刷新完成: ${refreshed}/${total} 成功，${failed} 失败`;
+      showToast(message, 'warning');
+    } else {
+      message += (message ? ' ' : '') + `全部刷新成功 (${refreshed}/${total})`;
+      showToast(message, 'success');
+    }
+
+    // Reload dashboard to show updated quotas and new accounts
     loadDashboard();
   } catch (e) {
     showToast('网络错误', 'error');
