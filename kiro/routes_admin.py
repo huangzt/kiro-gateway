@@ -95,11 +95,24 @@ _SENSITIVE_KEYS = {
 @router.get("", include_in_schema=False)
 @router.get("/", include_in_schema=False)
 async def admin_ui():
-    """Serve the admin HTML page."""
+    """Serve the admin HTML page with cache-busting version."""
     html_path = Path(__file__).parent / "static" / "admin.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Admin UI not found")
-    return FileResponse(str(html_path), media_type="text/html")
+
+    # Use file modification time as version for cache busting
+    js_path = Path(__file__).parent / "static" / "admin.js"
+    version = int(js_path.stat().st_mtime) if js_path.exists() else 1
+
+    # Read and inject version into HTML
+    html_content = html_path.read_text(encoding="utf-8")
+    html_content = html_content.replace(
+        'src="/admin-static/admin.js"',
+        f'src="/admin-static/admin.js?v={version}"'
+    )
+
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html_content)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +309,7 @@ async def refresh_quota(account_name: str, request: Request) -> JSONResponse:
             "remaining": slot.quota_info.remaining,
             "plan": slot.quota_info.subscription_plan,
             "next_reset": slot.quota_info.next_reset,
+            "trial_expiry": slot.quota_info.trial_expiry,
         }
 
     return JSONResponse(

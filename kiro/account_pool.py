@@ -557,6 +557,7 @@ class AccountPool:
                     "remaining": slot.quota_info.remaining,
                     "plan": slot.quota_info.subscription_plan,
                     "next_reset": slot.quota_info.next_reset,
+                    "trial_expiry": slot.quota_info.trial_expiry,
                     "last_checked_age_seconds": round(slot.quota_info.age_seconds()),
                 }
             if is_cooling:

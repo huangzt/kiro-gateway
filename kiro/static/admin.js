@@ -156,24 +156,33 @@ function renderAccountCard(a) {
   // Quota bar
   let quotaHtml = '';
   if (a.quota) {
-    const { used = 0, limit = 0, remaining = 0, plan = '', next_reset = '—' } = a.quota;
+    const { used = 0, limit = 0, remaining = 0, plan = '', next_reset = '—', trial_expiry = '' } = a.quota;
     const pct = limit > 0 ? (used / limit * 100) : 0;
     const fillCls = pct >= 95 ? 'danger' : pct >= 80 ? 'warning' : '';
-    const formatNextReset = (str) => {
+    const formatNextReset = (str, trialStr) => {
       if (!str || str === '—') return '—';
       try {
         const d = new Date(str);
         if (isNaN(d.getTime())) return str;
         const fmt = d => `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
         const reset = fmt(d);
-        const trialD = new Date(d.getTime() + 7 * 24 * 3600 * 1000);
-        const diffDays = Math.ceil((trialD - new Date()) / (24 * 3600 * 1000));
-        let remColor = 'var(--green)';
-        let remText = ` (剩${diffDays}天)`;
-        if (diffDays <= 0) { remColor = 'var(--red)'; remText = ' (已过期)'; }
-        else if (diffDays <= 2) { remColor = 'var(--yellow)'; }
-        const remSpan = `<span style="color:${remColor};font-size:10px">${remText}</span>`;
-        return `<span style="color:var(--accent);font-weight:600">重置 ${reset}</span> · <span style="color:var(--blue);font-weight:600">试用 ${fmt(trialD)}</span>${remSpan}`;
+
+        // Use trial_expiry from backend if available
+        if (trialStr && trialStr !== '—' && trialStr !== '') {
+          const trialD = new Date(trialStr);
+          if (!isNaN(trialD.getTime())) {
+            const diffDays = Math.ceil((trialD - new Date()) / (24 * 3600 * 1000));
+            let remColor = 'var(--green)';
+            let remText = ` (剩${diffDays}天)`;
+            if (diffDays <= 0) { remColor = 'var(--red)'; remText = ' (已过期)'; }
+            else if (diffDays <= 2) { remColor = 'var(--yellow)'; }
+            const remSpan = `<span style="color:${remColor};font-size:10px">${remText}</span>`;
+            return `<span style="color:var(--accent);font-weight:600">重置 ${reset}</span> · <span style="color:var(--blue);font-weight:600">试用 ${fmt(trialD)}</span>${remSpan}`;
+          }
+        }
+
+        // Fallback: only show reset date if no trial info
+        return `<span style="color:var(--accent);font-weight:600">重置 ${reset}</span>`;
       } catch(e) { return str; }
     };
 
@@ -186,7 +195,7 @@ function renderAccountCard(a) {
         <div class="progress-bar"><div class="progress-fill ${fillCls}" style="width:${Math.min(pct,100).toFixed(1)}%"></div></div>
         <div class="quota-meta">
           <span>剩余 ${remaining.toFixed(1)}</span>
-          <span>${formatNextReset(next_reset)}</span>
+          <span>${formatNextReset(next_reset, trial_expiry)}</span>
         </div>
       </div>`;
   } else {
