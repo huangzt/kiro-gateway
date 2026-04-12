@@ -423,7 +423,7 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
                     slot = AccountSlot(name=account_name, auth_manager=auth_manager)
 
                     # Add to pool
-                    pool.add_slot(slot)
+                    await pool.add_slot(slot)
                     new_accounts_count += 1
                     logger.info(f"Auto-discovered and added account: {account_name}")
 
