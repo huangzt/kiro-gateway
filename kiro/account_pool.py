@@ -211,6 +211,11 @@ class AccountPool:
         self._quota_check_interval = quota_check_interval
         self._broadcaster = None  # Will be set by main.py after initialization
 
+        # Status broadcast throttling (Throttle + Trailing)
+        self._last_broadcast_time = 0.0
+        self._pending_broadcast = False
+        self._broadcast_timer: Optional[asyncio.Task] = None
+
         # Pre-populate queue with all available slots
         for slot in self._slots:
             if not slot.is_exhausted and not slot.is_disabled:
@@ -619,12 +624,67 @@ class AccountPool:
         """
         Broadcast current pool status to all SSE clients via LogBroadcaster.
 
-        This is called after state changes (release, cooldown expiry, etc.)
-        to push real-time updates to the admin dashboard.
+        Uses Throttle + Trailing strategy to limit broadcast frequency:
+        - Immediate broadcast if enough time has passed since last broadcast
+        - Otherwise, schedule a delayed broadcast to ensure final state is sent
+        - Interval is auto-adjusted based on pool size:
+          * 1-20 accounts: 1 second interval
+          * 21+ accounts: 2 second interval
+
+        This prevents overwhelming SSE clients during high-concurrency scenarios
+        while ensuring the dashboard always reflects the final accurate state.
         """
         if self._broadcaster is None:
             return
 
+        # Auto-adjust interval based on pool size
+        broadcast_interval = 2.0 if self.size > 20 else 1.0
+
+        now = time.monotonic()
+        time_since_last = now - self._last_broadcast_time
+
+        if time_since_last >= broadcast_interval:
+            # Enough time has passed, broadcast immediately
+            await self._do_broadcast()
+            self._pending_broadcast = False
+            if self._broadcast_timer:
+                self._broadcast_timer.cancel()
+                self._broadcast_timer = None
+        else:
+            # Too soon, mark as pending
+            self._pending_broadcast = True
+
+            # Schedule delayed broadcast if not already scheduled
+            if not self._broadcast_timer or self._broadcast_timer.done():
+                delay = broadcast_interval - time_since_last
+                self._broadcast_timer = asyncio.create_task(
+                    self._delayed_broadcast(delay)
+                )
+
+    async def _delayed_broadcast(self, delay: float) -> None:
+        """
+        Execute a delayed status broadcast after the specified delay.
+
+        Args:
+            delay: Seconds to wait before broadcasting
+        """
+        try:
+            await asyncio.sleep(delay)
+            if self._pending_broadcast:
+                await self._do_broadcast()
+                self._pending_broadcast = False
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._broadcast_timer = None
+
+    async def _do_broadcast(self) -> None:
+        """
+        Perform the actual status broadcast.
+
+        Updates last broadcast time and sends status to all SSE clients.
+        """
+        self._last_broadcast_time = time.monotonic()
         try:
             status = self.get_status()
             self._broadcaster.broadcast_status(status)
