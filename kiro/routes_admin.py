@@ -1014,10 +1014,15 @@ async def update_config(request: Request) -> JSONResponse:
 @router.get("/logs/stream", dependencies=[Depends(verify_admin_key)])
 async def logs_stream(request: Request):
     """
-    Stream real-time logs via Server-Sent Events (SSE).
+    Stream real-time logs and status updates via Server-Sent Events (SSE).
 
-    On connect, sends the full history buffer first (as individual
-    SSE events), then streams new log entries in real time.
+    On connect, sends the full log history buffer first, followed by
+    the current account pool status, then streams new log entries and
+    status updates in real time.
+
+    Event types:
+    - log: Log entry with time, level, message, module, function, line
+    - status: Account pool status update (triggered by state changes)
 
     Clients should reconnect on disconnect (SSE auto-reconnect).
 
@@ -1028,16 +1033,29 @@ async def logs_stream(request: Request):
     if broadcaster is None:
         raise HTTPException(status_code=503, detail="Log broadcaster not initialized")
 
+    pool: AccountPool = request.app.state.account_pool
+    admin_cfg: AdminConfig = request.app.state.admin_config
+
     async def event_stream():
         queue, history = await broadcaster.subscribe()
         try:
-            # Send history first
+            # Send log history first
             for entry in history:
                 if await request.is_disconnected():
                     return
                 yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
 
-            # Stream new entries
+            # Send initial status snapshot
+            if await request.is_disconnected():
+                return
+            status = pool.get_status()
+            multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+            status["mode"] = "multi" if multi_dir else "single"
+            status["multi_creds_dir"] = multi_dir or None
+            status_event = {"type": "status", "data": status}
+            yield f"data: {json.dumps(status_event, ensure_ascii=False)}\n\n"
+
+            # Stream new entries (logs and status updates)
             while True:
                 if await request.is_disconnected():
                     return

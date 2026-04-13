@@ -209,6 +209,7 @@ class AccountPool:
         self._slots = slots
         self._queue: asyncio.Queue[AccountSlot] = asyncio.Queue()
         self._quota_check_interval = quota_check_interval
+        self._broadcaster = None  # Will be set by main.py after initialization
 
         # Pre-populate queue with all available slots
         for slot in self._slots:
@@ -491,6 +492,8 @@ class AccountPool:
                 f"Account released: {slot.name} "
                 f"(available={self.available_count})"
             )
+            # Broadcast status update after release
+            await self._broadcast_status_update()
 
     async def _delayed_release(self, slot: AccountSlot, delay: float) -> None:
         """
@@ -515,6 +518,8 @@ class AccountPool:
                 f"Account '{slot.name}' cooldown expired, back in pool "
                 f"(available={self.available_count})"
             )
+            # Broadcast status update after cooldown expires
+            await self._broadcast_status_update()
         except asyncio.CancelledError:
             # If task is cancelled (e.g., server shutdown), put slot back immediately
             slot.cooldown_until = 0.0
@@ -604,6 +609,22 @@ class AccountPool:
             "total_remaining_quota": round(total_remaining, 1),
             "accounts": accounts_status,
         }
+
+    async def _broadcast_status_update(self) -> None:
+        """
+        Broadcast current pool status to all SSE clients via LogBroadcaster.
+
+        This is called after state changes (release, cooldown expiry, etc.)
+        to push real-time updates to the admin dashboard.
+        """
+        if self._broadcaster is None:
+            return
+
+        try:
+            status = self.get_status()
+            self._broadcaster.broadcast_status(status)
+        except Exception as e:
+            logger.debug(f"Failed to broadcast status update: {e}")
 
     # ------------------------------------------------------------------
     # Dynamic slot management (Admin UI)

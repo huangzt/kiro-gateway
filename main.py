@@ -464,6 +464,9 @@ async def lifespan(app: FastAPI):
     
     app.state.account_pool = account_pool
 
+    # Link broadcaster to account pool for real-time status updates
+    account_pool._broadcaster = broadcaster
+
     # For backward compatibility, expose the first auth_manager as app.state.auth_manager
     # This is used by /v1/models endpoint and other places that need a single auth_manager
     if account_pool.size > 0:

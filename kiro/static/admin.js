@@ -2,7 +2,6 @@
 // State
 // ═══════════════════════════════════════════════════════════
 let apiKey = localStorage.getItem('kiro_admin_key') || '';
-let autoRefreshTimer = null;
 let sseAbortController = null;
 let paused = false;
 let autoScroll = true;
@@ -43,7 +42,6 @@ function showLoginError(msg) {
 function doLogout() {
   localStorage.removeItem('kiro_admin_key');
   stopSSE();
-  clearInterval(autoRefreshTimer);
   apiKey = '';
   document.getElementById('app').classList.remove('visible');
   document.getElementById('login-screen').style.display = 'flex';
@@ -56,9 +54,6 @@ async function showApp() {
   await loadDashboard();
   loadConfig();
   startSSE();
-  autoRefreshTimer = setInterval(() => {
-    if (document.getElementById('pane-dashboard').classList.contains('active')) loadDashboard();
-  }, 60000); // 1 minutes = 60000ms
 }
 
 // Auto-login
@@ -89,7 +84,6 @@ function switchTab(name) {
   document.getElementById('pane-' + name).classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('add-fab').style.display = name === 'dashboard' ? '' : 'none';
-  if (name === 'dashboard') loadDashboard();
   if (name === 'config') loadConfig();
   if (name === 'logs' && !sseAbortController) startSSE();
 }
@@ -114,6 +108,37 @@ function getAccountStatus(a) {
 }
 
 function renderDashboard(data) {
+  document.getElementById('s-total').textContent     = data.total_accounts ?? '—';
+  document.getElementById('s-active').textContent    = data.available ?? '—';
+  document.getElementById('s-cooling').textContent   = data.cooling_down ?? '—';
+  document.getElementById('s-exhausted').textContent = data.exhausted ?? '—';
+  document.getElementById('s-disabled').textContent  = data.disabled ?? '—';
+  document.getElementById('s-quota').textContent     = data.total_remaining_quota ?? '—';
+
+  const badge = document.getElementById('mode-badge');
+  const isMulti = data.mode === 'multi';
+  badge.textContent = isMulti ? 'Multi' : 'Single';
+  badge.className = 'badge-mode ' + (isMulti ? 'multi' : 'single');
+
+  document.getElementById('last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString();
+
+  const accounts = data.accounts || [];
+  document.getElementById('account-count').textContent = `(共 ${accounts.length} 个)`;
+
+  const grid = document.getElementById('account-grid');
+  if (!accounts.length) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      <div class="empty-icon">📭</div>
+      <div class="empty-title">暂无账号</div>
+      <div class="empty-sub">点击右下角 + 添加第一个账号</div>
+    </div>`;
+    return;
+  }
+  grid.innerHTML = accounts.map(renderAccountCard).join('');
+}
+
+function updateDashboardFromStatus(data) {
+  // Update statistics cards
   document.getElementById('s-total').textContent     = data.total_accounts ?? '—';
   document.getElementById('s-active').textContent    = data.available ?? '—';
   document.getElementById('s-cooling').textContent   = data.cooling_down ?? '—';
@@ -711,7 +736,15 @@ async function _runSSE(ctrl) {
         buf = buf.slice(nl + 2);
         for (const line of block.split('\n')) {
           if (line.startsWith('data: ')) {
-            try { appendLog(JSON.parse(line.slice(6))); } catch (e) { /* skip malformed */ }
+            try {
+              const entry = JSON.parse(line.slice(6));
+              // Handle different event types
+              if (entry.type === 'log') {
+                appendLog(entry);
+              } else if (entry.type === 'status') {
+                updateDashboardFromStatus(entry.data);
+              }
+            } catch (e) { /* skip malformed */ }
           }
         }
       }

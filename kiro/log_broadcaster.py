@@ -116,6 +116,7 @@ class LogBroadcaster:
         """
         record = message.record
         entry = {
+            "type": "log",
             "time": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
             "level": record["level"].name,
             "message": record["message"],
@@ -134,16 +135,41 @@ class LogBroadcaster:
         # Fan-out broadcast to all subscriber queues (non-blocking)
         # Skip broadcasting for admin logs
         if should_broadcast:
-            dead_queues: Set[asyncio.Queue] = set()
-            for q in self._queues:
-                try:
-                    q.put_nowait(entry)
-                except (asyncio.QueueFull, Exception):
-                    dead_queues.add(q)
+            self._broadcast_to_queues(entry)
 
-            # Prune dead/full queues
-            if dead_queues:
-                self._queues -= dead_queues
+    def broadcast_status(self, status_data: Dict[str, Any]) -> None:
+        """
+        Broadcast account pool status update to all SSE clients.
+
+        This method is called when account pool state changes (e.g., after
+        a request completes, quota refresh, cooldown update).
+
+        Args:
+            status_data: Status dictionary from AccountPool.get_status()
+        """
+        entry = {
+            "type": "status",
+            "data": status_data,
+        }
+        self._broadcast_to_queues(entry)
+
+    def _broadcast_to_queues(self, entry: Dict[str, Any]) -> None:
+        """
+        Fan-out broadcast an entry to all subscriber queues.
+
+        Args:
+            entry: Entry to broadcast (log or status)
+        """
+        dead_queues: Set[asyncio.Queue] = set()
+        for q in self._queues:
+            try:
+                q.put_nowait(entry)
+            except (asyncio.QueueFull, Exception):
+                dead_queues.add(q)
+
+        # Prune dead/full queues
+        if dead_queues:
+            self._queues -= dead_queues
 
     # ------------------------------------------------------------------
     # Admin log filtering
