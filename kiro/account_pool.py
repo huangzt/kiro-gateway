@@ -341,6 +341,9 @@ class AccountPool:
                 f"(active={slot.active_requests}, total={slot.total_requests}{quota_str})"
             )
 
+            # Broadcast status update after acquire
+            await self._broadcast_status_update()
+
             return slot
 
     async def _maybe_refresh_quota(self, slot: AccountSlot) -> None:
@@ -385,6 +388,8 @@ class AccountPool:
                     f"(quota: {quota.usage_summary}, plan: {quota.subscription_plan}). "
                     f"Removed from active pool."
                 )
+                # Broadcast status update when account becomes exhausted
+                await self._broadcast_status_update()
             else:
                 logger.info(
                     f"Quota check: {slot.name} ({quota.email}) "
@@ -668,6 +673,8 @@ class AccountPool:
             f"Account slot added: '{slot.name}' "
             f"(pool size: {self.size}, available: {self.available_count})"
         )
+        # Broadcast status update after adding slot
+        await self._broadcast_status_update()
 
     async def remove_slot(self, name: str) -> bool:
         """
@@ -702,6 +709,8 @@ class AccountPool:
         slot.is_disabled = True
         self._slots.remove(slot)
         logger.info(f"Account slot removed: '{name}' (pool size: {self.size})")
+        # Broadcast status update after removing slot
+        await self._broadcast_status_update()
         return True
 
     def switch_to_account(self, name: str) -> bool:
@@ -784,6 +793,8 @@ class AccountPool:
 
         slot.is_disabled = True
         logger.info(f"Account slot disabled: '{name}'")
+        # Broadcast status update after disabling slot
+        await self._broadcast_status_update()
         return True
 
     async def enable_slot(self, name: str) -> bool:
@@ -816,6 +827,8 @@ class AccountPool:
             f"Account slot enabled: '{name}' "
             f"(available: {self.available_count})"
         )
+        # Broadcast status update after enabling slot
+        await self._broadcast_status_update()
         return True
 
     async def clear_cooldown(self, name: str) -> bool:
@@ -848,6 +861,8 @@ class AccountPool:
             f"Cooldown cleared for '{name}' — slot immediately available "
             f"(available: {self.available_count})"
         )
+        # Broadcast status update after clearing cooldown
+        await self._broadcast_status_update()
         return True
 
     @classmethod
