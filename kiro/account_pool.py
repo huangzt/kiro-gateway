@@ -292,13 +292,40 @@ class AccountPool:
         while True:
             remaining_timeout = deadline - time.monotonic()
             if remaining_timeout <= 0:
+                # Timeout reached - analyze why and provide specific error message
                 if self.size == 0:
                     logger.error("No accounts configured in the pool. Add accounts via Admin UI.")
                     raise asyncio.TimeoutError("No accounts available")
-                logger.warning(
-                    f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
+
+                # Check specific reasons for timeout
+                all_exhausted = all(slot.is_exhausted for slot in self._slots)
+                all_cooling = all(
+                    slot.cooldown_until > time.monotonic()
+                    for slot in self._slots
+                    if not slot.is_exhausted
                 )
-                raise asyncio.TimeoutError()
+
+                if all_exhausted:
+                    logger.error(
+                        f"All {self.size} account(s) have exhausted their quota. "
+                        f"Cannot process any requests until quota resets or new accounts are added."
+                    )
+                    raise asyncio.TimeoutError(
+                        "All accounts exhausted. Service unavailable until quota reset."
+                    )
+                elif all_cooling:
+                    logger.error(
+                        f"All {self.size} account(s) are in cooldown due to rate limiting. "
+                        f"Cannot process requests until cooldown expires."
+                    )
+                    raise asyncio.TimeoutError(
+                        "All accounts rate-limited. Service temporarily unavailable."
+                    )
+                else:
+                    logger.error(
+                        f"Queue timeout after {timeout}s - all {self.size} account(s) busy"
+                    )
+                    raise asyncio.TimeoutError("All accounts busy. Service overloaded.")
 
             try:
                 slot = await asyncio.wait_for(
@@ -306,13 +333,40 @@ class AccountPool:
                 )
                 slot._in_queue = False
             except asyncio.TimeoutError:
+                # Timeout during queue.get() - analyze why and provide specific error message
                 if self.size == 0:
                     logger.error("No accounts configured in the pool. Add accounts via Admin UI.")
                     raise asyncio.TimeoutError("No accounts available")
-                logger.warning(
-                    f"Queue timeout after {timeout}s - all {self.size} account(s) busy or exhausted"
+
+                # Check specific reasons for timeout
+                all_exhausted = all(slot.is_exhausted for slot in self._slots)
+                all_cooling = all(
+                    slot.cooldown_until > time.monotonic()
+                    for slot in self._slots
+                    if not slot.is_exhausted
                 )
-                raise
+
+                if all_exhausted:
+                    logger.error(
+                        f"All {self.size} account(s) have exhausted their quota. "
+                        f"Cannot process any requests until quota resets or new accounts are added."
+                    )
+                    raise asyncio.TimeoutError(
+                        "All accounts exhausted. Service unavailable until quota reset."
+                    )
+                elif all_cooling:
+                    logger.error(
+                        f"All {self.size} account(s) are in cooldown due to rate limiting. "
+                        f"Cannot process requests until cooldown expires."
+                    )
+                    raise asyncio.TimeoutError(
+                        "All accounts rate-limited. Service temporarily unavailable."
+                    )
+                else:
+                    logger.error(
+                        f"Queue timeout after {timeout}s - all {self.size} account(s) busy"
+                    )
+                    raise asyncio.TimeoutError("All accounts busy. Service overloaded.")
 
             # Check quota if interval has elapsed
             if self._quota_check_interval > 0:
@@ -320,10 +374,27 @@ class AccountPool:
 
             # If slot became exhausted after quota check, skip it
             if slot.is_exhausted:
-                logger.warning(
-                    f"Skipping exhausted account '{slot.name}' "
-                    f"({slot.email}, quota: {slot.quota_summary})"
-                )
+                # Check if this is the last available account
+                available_slots = [
+                    s for s in self._slots
+                    if not s.is_exhausted and not s.is_disabled
+                ]
+
+                if not available_slots:
+                    logger.error(
+                        f"Last available account '{slot.name}' is exhausted. "
+                        f"All {self.size} account(s) have reached quota limits. "
+                        f"Service unavailable until quota resets."
+                    )
+                    raise asyncio.TimeoutError(
+                        "All accounts exhausted. No quota remaining."
+                    )
+                else:
+                    logger.warning(
+                        f"Skipping exhausted account '{slot.name}' "
+                        f"({slot.email}, quota: {slot.quota_summary}). "
+                        f"{len(available_slots)} account(s) still available."
+                    )
                 # Don't put it back - it's permanently out
                 continue
 

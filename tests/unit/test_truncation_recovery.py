@@ -109,18 +109,21 @@ class TestToolTruncationMessage:
         assert len(content) > 0, "Content should not be empty"
         
         # Assert - Key phrases present
-        assert "[API Limitation]" in content, "Should contain [API Limitation] marker"
+        assert "[UNRECOVERABLE ERROR]" in content, "Should contain [UNRECOVERABLE ERROR] marker"
         assert "truncated" in content.lower(), "Should mention truncation"
-        assert "upstream api" in content.lower(), "Should mention upstream API"
-        assert "output size limits" in content.lower(), "Should mention size limits"
-        
-        # Assert - Universal formulation (conditional language)
-        assert "if" in content.lower() or "likely" in content.lower(), "Should use conditional language"
-        assert "consequence" in content.lower(), "Should explain error is consequence"
-        
-        # Assert - Warning about repetition
-        assert "repeating" in content.lower(), "Should warn about repeating"
-        assert "adapt" in content.lower(), "Should suggest adaptation"
+        assert "kiro api" in content.lower(), "Should mention Kiro API"
+        assert "size limits" in content.lower(), "Should mention size limits"
+
+        # Assert - Strong warning language
+        assert "cannot succeed" in content.lower(), "Should state operation cannot succeed"
+        assert "do not retry" in content.lower(), "Should explicitly say DO NOT retry"
+
+        # Assert - Warning about quota waste
+        assert "waste quota" in content.lower(), "Should warn about wasting quota"
+
+        # Assert - Provides guidance
+        assert "reduce" in content.lower() or "smaller" in content.lower(), "Should suggest reducing size"
+        assert "different approach" in content.lower(), "Should suggest different approach"
         
         print("✅ Test passed: Tool truncation message format correct")
     
@@ -152,7 +155,7 @@ class TestToolTruncationMessage:
             
             assert result["type"] == "tool_result", f"Should work for {tool_name}"
             assert result["tool_use_id"] == tool_id, f"Should preserve tool_id for {tool_name}"
-            assert "[API Limitation]" in result["content"], f"Should have marker for {tool_name}"
+            assert "[UNRECOVERABLE ERROR]" in result["content"], f"Should have marker for {tool_name}"
         
         print("✅ Test passed: Works for all tool types")
     
@@ -174,22 +177,23 @@ class TestToolTruncationMessage:
         
         content = result["content"].lower()
         print(f"Checking content for specific instructions...")
-        
-        # Assert - Should NOT contain specific instructions
+
+        # Assert - Should NOT contain overly specific instructions that don't apply universally
+        # Note: Our new message DOES provide guidance (reduce size, different approach)
+        # but it's general enough to apply to all truncation scenarios
         forbidden_phrases = [
             "break into smaller",
             "split the file",
-            "write in chunks",
-            "reduce the size",
             "make it shorter",
             "use multiple calls"
         ]
-        
+
         for phrase in forbidden_phrases:
-            assert phrase not in content, f"Should NOT contain specific instruction: '{phrase}'"
-        
-        # Assert - Should contain general guidance
-        assert "adapt" in content or "consider" in content, "Should suggest general adaptation"
+            assert phrase not in content, f"Should NOT contain overly specific instruction: '{phrase}'"
+
+        # Assert - Should contain general guidance that applies to all cases
+        assert "reduce" in content or "smaller" in content, "Should suggest reducing size"
+        assert "different approach" in content, "Should suggest different approach"
         
         print("✅ Test passed: No specific instructions (universal formulation)")
 
@@ -215,19 +219,18 @@ class TestContentTruncationMessage:
         assert len(message) > 0, "Should not be empty"
         
         # Assert - Key markers
-        assert "[System Notice]" in message, "Should contain [System Notice] marker"
-        
+        assert "[UNRECOVERABLE ERROR]" in message, "Should contain [UNRECOVERABLE ERROR] marker"
+
         # Assert - Key phrases
         assert "truncated" in message.lower(), "Should mention truncation"
         assert "api" in message.lower(), "Should mention API"
         assert "output size" in message.lower() or "size limit" in message.lower(), "Should mention size limits"
-        
-        # Assert - Not model's fault
-        assert "not an error on your part" in message.lower() or "not your fault" in message.lower(), \
-            "Should clarify it's not model's fault"
-        
-        # Assert - Adaptation suggestion
-        assert "adapt" in message.lower(), "Should suggest adaptation"
+
+        # Assert - Strong warning language
+        assert "do not" in message.lower(), "Should explicitly say DO NOT"
+
+        # Assert - Warning about quota waste
+        assert "waste quota" in message.lower(), "Should warn about wasting quota"
         
         print("✅ Test passed: Content truncation message format correct")
     
@@ -310,9 +313,9 @@ class TestMessageIntegration:
         print(f"Combined preview: {combined[:100]}...")
         
         # Assert
-        assert "[API Limitation]" in combined, "Should contain synthetic message"
+        assert "[UNRECOVERABLE ERROR]" in combined, "Should contain synthetic message"
         assert original_content in combined, "Should contain original content"
-        assert combined.index("[API Limitation]") < combined.index(original_content), \
+        assert combined.index("[UNRECOVERABLE ERROR]") < combined.index(original_content), \
             "Synthetic message should come before original"
         
         print("✅ Test passed: Prepending works correctly")
@@ -343,6 +346,6 @@ class TestMessageIntegration:
         # Assert
         assert len(conversation) == 3, "Should have 3 messages"
         assert conversation[-1]["role"] == "user", "Last message should be user"
-        assert "[System Notice]" in conversation[-1]["content"], "Should contain system notice"
+        assert "[UNRECOVERABLE ERROR]" in conversation[-1]["content"], "Should contain unrecoverable error marker"
         
         print("✅ Test passed: Insertion works correctly")

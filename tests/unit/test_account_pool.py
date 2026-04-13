@@ -183,9 +183,13 @@ class TestAccountPoolInitialization:
         assert pool.busy_count == 0
 
     def test_pool_rejects_empty_slots(self):
-        """Test that AccountPool rejects empty slot list."""
-        with pytest.raises(ValueError, match="at least one account slot"):
-            AccountPool([])
+        """Test that AccountPool allows empty slot list (for dynamic account addition via Admin UI)."""
+        # Empty pool is now allowed - accounts can be added dynamically via Admin UI
+        pool = AccountPool([])
+
+        assert pool.size == 0
+        assert pool.available_count == 0
+        assert pool.busy_count == 0
 
 
 # =============================================================================
@@ -237,9 +241,12 @@ class TestFromDirectory:
             AccountPool.from_directory("/nonexistent/path/x9y8z7")
 
     def test_from_directory_rejects_empty_directory(self, tmp_path):
-        """Test that an empty directory raises ValueError."""
-        with pytest.raises(ValueError, match="No account subdirectories"):
-            AccountPool.from_directory(str(tmp_path))
+        """Test that an empty directory returns empty pool (for dynamic account addition)."""
+        # Empty directory now returns empty pool instead of raising error
+        pool = AccountPool.from_directory(str(tmp_path))
+
+        assert pool.size == 0
+        assert pool.available_count == 0
 
     def test_from_directory_rejects_file_path(self, tmp_path):
         """Test that a file path (not directory) raises ValueError."""
@@ -317,14 +324,17 @@ class TestFromDirectory:
         assert pool.slots[0].name == "valid"
 
     def test_from_directory_all_invalid_raises_error(self, tmp_path):
-        """Test that ValueError is raised if all subdirs are invalid."""
+        """Test that empty pool is returned if all subdirs are invalid (for dynamic account addition)."""
         # Account with invalid JSON
         broken_dir = tmp_path / "broken"
         broken_dir.mkdir(parents=True)
         (broken_dir / "kiro-auth-token.json").write_text("{invalid")
 
-        with pytest.raises(ValueError, match="No valid accounts"):
-            AccountPool.from_directory(str(tmp_path), region="us-east-1")
+        # All invalid accounts now returns empty pool instead of raising error
+        pool = AccountPool.from_directory(str(tmp_path), region="us-east-1")
+
+        assert pool.size == 0
+        assert pool.available_count == 0
 
     def test_from_directory_ignores_files_in_root(self, tmp_path):
         """Test that files (not directories) in root are ignored."""

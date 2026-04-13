@@ -51,36 +51,47 @@ def generate_truncation_tool_result(
 ) -> Dict[str, Any]:
     """
     Generate synthetic tool_result for truncated tool call.
-    
+
     Message is carefully worded to:
-    - Acknowledge API limitation (not model's fault)
-    - Warn against repeating same operation
-    - NOT give specific instructions (avoid micro-steps)
-    
+    - Use strong language to prevent retries (UNRECOVERABLE ERROR)
+    - Explicitly state DO NOT retry to stop infinite retry loops
+    - Provide specific truncation details for debugging
+    - Warn about quota waste to discourage retries
+
     Args:
         tool_name: Name of the truncated tool
         tool_use_id: ID of the truncated tool call
         truncation_info: Diagnostic information about truncation
-    
+
     Returns:
         Synthetic tool_result in unified format
-    
+
     Example:
         >>> generate_truncation_tool_result("Write", "call_123", {"size_bytes": 5000, "reason": "missing 2 closing braces"})
-        {'type': 'tool_result', 'tool_use_id': 'call_123', 'content': '[API Limitation] ...', 'is_error': True}
+        {'type': 'tool_result', 'tool_use_id': 'call_123', 'content': '[UNRECOVERABLE ERROR] ...', 'is_error': True}
     """
+    size_bytes = truncation_info.get('size_bytes', 'unknown')
+    reason = truncation_info.get('reason', 'unknown')
+
     content = (
-        "[API Limitation] Your tool call was truncated by the upstream API due to output size limits.\n\n"
-        "If the tool result below shows an error or unexpected behavior, this is likely a CONSEQUENCE of the truncation, "
-        "not the root cause. The tool call itself was cut off before it could be fully transmitted.\n\n"
-        "Repeating the exact same operation will be truncated again. Consider adapting your approach."
+        "[UNRECOVERABLE ERROR] Tool call exceeded Kiro API size limits and was truncated.\n\n"
+        f"Truncation details:\n"
+        f"- Size: {size_bytes} bytes\n"
+        f"- Reason: {reason}\n"
+        f"- Tool: {tool_name}\n\n"
+        "This operation CANNOT succeed with the current parameters. "
+        "The API has hard limits on tool call size.\n\n"
+        "DO NOT retry this exact operation. You must either:\n"
+        "1. Significantly reduce the operation size (e.g., read/write much smaller chunks)\n"
+        "2. Use a completely different approach that avoids large tool calls\n\n"
+        "Retrying the same operation will fail again and waste quota."
     )
-    
-    logger.debug(
-        f"Generated synthetic tool_result for truncated tool '{tool_name}' "
-        f"(id={tool_use_id}, {truncation_info['size_bytes']} bytes, {truncation_info['reason']})"
+
+    logger.error(
+        f"[TRUNCATION] Tool '{tool_name}' truncated at {size_bytes} bytes ({reason}). "
+        f"This is an UNRECOVERABLE error. Client must change approach."
     )
-    
+
     return {
         "type": "tool_result",
         "tool_use_id": tool_use_id,
@@ -92,21 +103,24 @@ def generate_truncation_tool_result(
 def generate_truncation_user_message() -> str:
     """
     Generate synthetic user message for content truncation.
-    
+
     Message is carefully worded to:
-    - Acknowledge it's not model's fault
-    - Suggest adaptation without specific instructions
-    - NOT tell model to "break into steps" (causes micro-steps)
-    
+    - Use strong language to prevent retries (UNRECOVERABLE ERROR)
+    - Explicitly state DO NOT retry to stop infinite retry loops
+    - Warn about quota waste to discourage retries
+    - Provide clear guidance on what to do instead
+
     Returns:
         Synthetic user message text
-    
+
     Example:
         >>> generate_truncation_user_message()
-        '[System Notice] Your previous response was truncated...'
+        '[UNRECOVERABLE ERROR] Your previous response was truncated...'
     """
     return (
-        "[System Notice] Your previous response was truncated by the API due to "
-        "output size limitations. This is not an error on your part. "
-        "If you need to continue, please adapt your approach rather than repeating the same output."
+        "[UNRECOVERABLE ERROR] Your previous response was truncated by the API due to "
+        "output size limitations.\n\n"
+        "DO NOT attempt to continue or complete the truncated response. "
+        "You must use a fundamentally different approach that produces shorter output.\n\n"
+        "Retrying will fail again and waste quota."
     )

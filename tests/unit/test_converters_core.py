@@ -6151,11 +6151,11 @@ class TestGetTruncationRecoverySystemAddition:
         print("Checking that non-empty string is returned...")
         assert len(addition) > 0
         
-        print("Checking that [System Notice] marker is present...")
-        assert "[System Notice]" in addition
+        print("Checking that [UNRECOVERABLE ERROR] marker is present...")
+        assert "[UNRECOVERABLE ERROR]" in addition
         
-        print("Checking that [API Limitation] marker is present...")
-        assert "[API Limitation]" in addition
+        print("Checking that [UNRECOVERABLE ERROR] marker is present...")
+        assert "[UNRECOVERABLE ERROR]" in addition
         
         print("Checking that 'legitimate' is used to legitimize messages...")
         assert "legitimate" in addition.lower()
