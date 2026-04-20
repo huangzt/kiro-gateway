@@ -540,6 +540,19 @@ class TestPoolStatus:
             assert acct["active_requests"] == 0
             assert acct["total_requests"] == 0
 
+    def test_status_accounts_sorted_by_numeric_suffix(self, mock_auth_manager_factory):
+        """Account list should use natural numeric sorting for account-N names."""
+        slots = [
+            AccountSlot(name="account-10", auth_manager=mock_auth_manager_factory("10")),
+            AccountSlot(name="account-2", auth_manager=mock_auth_manager_factory("2")),
+            AccountSlot(name="account-1", auth_manager=mock_auth_manager_factory("1")),
+        ]
+        pool = AccountPool(slots)
+
+        status = pool.get_status()
+        names = [acct["name"] for acct in status["accounts"]]
+        assert names == ["account-1", "account-2", "account-10"]
+
     @pytest.mark.asyncio
     async def test_status_reflects_active_requests(self, multi_pool):
         """Test that status reflects acquired slots."""

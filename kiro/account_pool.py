@@ -59,6 +59,21 @@ from kiro.quota_checker import QuotaInfo, check_quota, QuotaCheckError
 from kiro.config import KIRO_HOST_CACHE_DIR
 
 
+def _account_name_sort_key(name: str) -> tuple[int, str]:
+    """
+    Build a natural sort key for account names like `account-1`, `account-10`.
+
+    Accounts that match `account-<number>` are sorted by numeric suffix.
+    Non-matching names are sorted lexicographically after numeric accounts.
+    """
+    prefix = "account-"
+    if name.startswith(prefix):
+        suffix = name[len(prefix):]
+        if suffix.isdigit():
+            return (0, f"{int(suffix):010d}")
+    return (1, name)
+
+
 @dataclass
 class AccountSlot:
     """
@@ -680,6 +695,8 @@ class AccountPool:
             if not slot.is_disabled and slot.quota_info:
                 total_remaining += slot.quota_info.remaining
 
+        accounts_status.sort(key=lambda account: _account_name_sort_key(account.get("name", "")))
+
         return {
             "total_accounts": self.size,
             "available": self.available_count,
@@ -1059,7 +1076,10 @@ class AccountPool:
         errors: List[str] = []
 
         # Scan subdirectories (sorted for deterministic order)
-        subdirs = sorted([d for d in dir_path.iterdir() if d.is_dir()])
+        subdirs = sorted(
+            [d for d in dir_path.iterdir() if d.is_dir()],
+            key=lambda d: _account_name_sort_key(d.name),
+        )
 
         if not subdirs:
             logger.warning(

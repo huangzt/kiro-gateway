@@ -157,6 +157,9 @@
       <div class="section-header">
         <div><span class="section-title">账号列表</span><span class="section-sub" id="account-count"></span></div>
         <div style="display: flex; gap: 8px;">
+          <button class="btn btn-ghost" onclick="toggleSelectAllAccounts()">☑️ 全选</button>
+          <button class="btn btn-ghost" onclick="exportSelectedAccountsZip()">📦 批量导出ZIP</button>
+          <button class="btn btn-ghost" onclick="autoImportHostCacheAccount()">⚡ 自动获取Kiro账号</button>
           <button class="btn btn-ghost" onclick="refreshAllQuotas()">🔄 全部刷新</button>
           <!-- <button class="btn btn-ghost" onclick="loadDashboard()">↻ 刷新</button> -->
         </div>
@@ -245,9 +248,22 @@
         ondrop="onDrop(event,'dev-drop','dev-file')">📄 点击选择或拖放文件</div>
       <input type="file" id="dev-file" accept=".json" style="display:none" onchange="onFileSelect(this,'dev-drop')">
     </div>
+    <div style="margin: 10px 0; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; font-size: 12px; color: var(--text3);">
+      或使用跨系统共享包导入（由“批量导出ZIP”生成）
+    </div>
+    <div class="field">
+      <div class="field-label">账号 ZIP 包 <span style="color:var(--text3)">(可选导入方式)</span></div>
+      <div class="field-drop" id="zip-drop"
+        onclick="document.getElementById('zip-file').click()"
+        ondragover="onDragOver(event,'zip-drop')"
+        ondragleave="onDragLeave('zip-drop')"
+        ondrop="onDrop(event,'zip-drop','zip-file')">📦 点击选择或拖放 .zip 文件</div>
+      <input type="file" id="zip-file" accept=".zip,application/zip" style="display:none" onchange="onFileSelect(this,'zip-drop')">
+    </div>
     <div id="add-error" style="color:var(--red);font-size:13px;min-height:18px;margin-bottom:4px"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeAddModal()">取消</button>
+      <button class="btn btn-ghost" onclick="submitImportZipAccounts()" id="import-zip-btn">导入ZIP</button>
       <button class="btn btn-primary" onclick="submitAddAccount()" id="add-submit-btn">添加账号</button>
     </div>
   </div>

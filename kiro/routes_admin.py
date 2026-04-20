@@ -33,16 +33,20 @@ by these endpoints; they are replaced with '***'.
 """
 
 import asyncio
+import io
 import json
 import re
 import shutil
+import zipfile
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, List
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Security, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.security import APIKeyHeader
 from loguru import logger
+from pydantic import BaseModel
 
 from kiro.config import PROXY_API_KEY, KIRO_MULTI_CREDS_DIR, PROFILE_ARN, REGION
 from kiro.account_pool import AccountPool, AccountSlot
@@ -253,10 +257,23 @@ async def add_account(
         client_secret=client_secret_override,
     )
 
+    pool: AccountPool = request.app.state.account_pool
+    new_email = await _fetch_email_for_duplicate_check(auth_manager)
+    if new_email:
+        existing = _find_existing_account_by_email(pool, new_email)
+        if existing:
+            shutil.rmtree(new_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"账号已存在：邮箱 {new_email} 已绑定账号 '{existing}'，"
+                    "无需重复导入。"
+                ),
+            )
+
     slot = AccountSlot(name=new_name, auth_manager=auth_manager)
 
     # Add to pool
-    pool: AccountPool = request.app.state.account_pool
     await pool.add_slot(slot)
 
     # Trigger initial quota check
@@ -272,6 +289,399 @@ async def add_account(
             "account_name": new_name,
             "message": f"Account '{new_name}' added successfully",
             "auth_type": auth_manager.auth_type.value,
+        }
+    )
+
+
+class ImportHostCacheRequest(BaseModel):
+    """Request body for importing credentials from host SSO cache."""
+
+    delete_source_files: bool = False
+
+
+class BatchExportAccountsRequest(BaseModel):
+    """Request body for batch exporting accounts as a zip file."""
+
+    account_names: List[str]
+    delete_exported_accounts: bool = False
+
+
+class ImportedAccountResult(BaseModel):
+    """Import result item for a single account in zip import."""
+
+    source_account: str
+    imported_account: Optional[str] = None
+    status: str
+    reason: Optional[str] = None
+
+
+@router.post(
+    "/accounts/import-host-cache",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def import_host_cache_account(
+    request: Request,
+    body: ImportHostCacheRequest,
+) -> JSONResponse:
+    """
+    Import account credentials from host SSO cache into the multi-account pool.
+
+    Reads `kiro-auth-token.json` (required) and `{clientIdHash}.json` (optional)
+    from `KIRO_HOST_CACHE_DIR`, creates a new account directory, hot-adds it to
+    the pool, and optionally deletes source files after successful import.
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+    if not multi_dir:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Multi-account mode is not configured. "
+                "Set KIRO_MULTI_CREDS_DIR in .env or configure "
+                "accounts.multi_creds_dir in gateway.yml first."
+            ),
+        )
+
+    from kiro.config import KIRO_HOST_CACHE_DIR
+
+    if not KIRO_HOST_CACHE_DIR:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "KIRO_HOST_CACHE_DIR is not configured in .env. "
+                "Setup volume mapping first."
+            ),
+        )
+
+    host_cache_dir = Path(KIRO_HOST_CACHE_DIR).expanduser().resolve()
+    if not host_cache_dir.exists() or not host_cache_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Host cache directory not found: {host_cache_dir}",
+        )
+
+    auth_path, device_reg_path, _ = _resolve_host_cache_files(host_cache_dir)
+
+    base_dir = Path(multi_dir).expanduser().resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    new_name = _next_account_dir_name(base_dir)
+    new_dir = base_dir / new_name
+    new_dir.mkdir(parents=True, exist_ok=False)
+
+    copied_files: list[str] = []
+    deleted_files: list[str] = []
+
+    try:
+        target_auth_path = new_dir / "kiro-auth-token.json"
+        shutil.copy2(str(auth_path), str(target_auth_path))
+        copied_files.append(target_auth_path.name)
+
+        client_id_override = None
+        client_secret_override = None
+
+        if device_reg_path:
+            target_device_path = new_dir / device_reg_path.name
+            shutil.copy2(str(device_reg_path), str(target_device_path))
+            copied_files.append(target_device_path.name)
+            with open(device_reg_path, "r", encoding="utf-8") as f:
+                dev_data = json.load(f)
+            client_id_override = dev_data.get("clientId")
+            client_secret_override = dev_data.get("clientSecret")
+
+        from kiro.auth import KiroAuthManager
+
+        auth_manager = KiroAuthManager(
+            profile_arn=PROFILE_ARN if PROFILE_ARN else None,
+            region=REGION,
+            creds_file=str(target_auth_path),
+            client_id=client_id_override,
+            client_secret=client_secret_override,
+        )
+
+        pool: AccountPool = request.app.state.account_pool
+        new_email = await _fetch_email_for_duplicate_check(auth_manager)
+        if new_email:
+            existing = _find_existing_account_by_email(pool, new_email)
+            if existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"账号已存在：邮箱 {new_email} 已绑定账号 '{existing}'，"
+                        "无需重复导入。"
+                    ),
+                )
+
+        slot = AccountSlot(name=new_name, auth_manager=auth_manager)
+        await pool.add_slot(slot)
+
+        try:
+            await pool._check_slot_quota(slot)
+        except Exception as exc:
+            logger.warning(f"Initial quota check for '{new_name}' failed (non-fatal): {exc}")
+
+        if body.delete_source_files:
+            deleted_files = _delete_host_cache_files(auth_path, device_reg_path)
+
+    except Exception:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        raise
+
+    logger.info(
+        "Imported host cache credentials as account '{}' (copied={}, deleted={})",
+        new_name,
+        copied_files,
+        deleted_files,
+    )
+    return JSONResponse(
+        content={
+            "success": True,
+            "account_name": new_name,
+            "copied_files": copied_files,
+            "deleted_source_files": deleted_files,
+            "message": f"Account '{new_name}' imported from host cache successfully",
+        }
+    )
+
+
+@router.post(
+    "/accounts/export-zip",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def export_accounts_zip(
+    request: Request,
+    body: BatchExportAccountsRequest,
+) -> Response:
+    """
+    Export selected account credential directories as a ZIP archive.
+
+    Optionally deletes exported accounts after a successful ZIP build.
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+    if not multi_dir:
+        raise HTTPException(status_code=400, detail="Multi-account mode not configured")
+
+    names = [n.strip() for n in body.account_names if n and n.strip()]
+    if not names:
+        raise HTTPException(status_code=400, detail="请至少选择一个账号")
+
+    unique_names = list(dict.fromkeys(names))
+    pool: AccountPool = request.app.state.account_pool
+    base_dir = Path(multi_dir).expanduser().resolve()
+
+    account_dirs: list[Path] = []
+    for name in unique_names:
+        slot = pool.get_slot_by_name(name)
+        if slot is None:
+            raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+        if slot.active_requests > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Account '{name}' has active requests and cannot be exported/deleted now.",
+            )
+        account_dir = base_dir / name
+        if not account_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Account directory not found: {name}")
+        account_dirs.append(account_dir)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, account_dir in zip(unique_names, account_dirs):
+            json_files = sorted([f for f in account_dir.glob("*.json") if f.is_file()])
+            if not json_files:
+                logger.warning(f"No json files found for account '{name}' during export")
+            for file_path in json_files:
+                arcname = f"{name}/{file_path.name}"
+                zf.write(file_path, arcname=arcname)
+
+    if body.delete_exported_accounts:
+        for name, account_dir in zip(unique_names, account_dirs):
+            removed = await pool.remove_slot(name)
+            if not removed:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Failed to remove '{name}' from pool during delete-after-export",
+                )
+            if account_dir.exists():
+                shutil.rmtree(account_dir)
+            admin_cfg.remove_disabled_account(name)
+        await admin_cfg.save()
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"kiro-accounts-{ts}.zip"
+    zip_bytes = zip_buffer.getvalue()
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=zip_bytes, media_type="application/zip", headers=headers)
+
+
+@router.post(
+    "/accounts/import-zip",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def import_accounts_zip(
+    request: Request,
+    zip_file: UploadFile = File(..., description="ZIP exported from /admin/accounts/export-zip"),
+) -> JSONResponse:
+    """
+    Import accounts from exported ZIP archive.
+
+    ZIP layout is expected as:
+        account-1/kiro-auth-token.json
+        account-1/{clientIdHash}.json (optional)
+        account-2/...
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    multi_dir = admin_cfg.get_multi_creds_dir() or KIRO_MULTI_CREDS_DIR
+    if not multi_dir:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Multi-account mode is not configured. "
+                "Set KIRO_MULTI_CREDS_DIR in .env or configure "
+                "accounts.multi_creds_dir in gateway.yml first."
+            ),
+        )
+
+    filename = zip_file.filename or ""
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="请选择 .zip 压缩包文件")
+
+    try:
+        zip_bytes = await zip_file.read()
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+            account_files = _collect_account_files_from_zip(zf)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="ZIP 文件损坏或格式不正确")
+
+    if not account_files:
+        raise HTTPException(status_code=400, detail="ZIP 中未找到可导入的账号文件")
+
+    base_dir = Path(multi_dir).expanduser().resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    pool: AccountPool = request.app.state.account_pool
+
+    imported: list[ImportedAccountResult] = []
+    skipped: list[ImportedAccountResult] = []
+
+    source_accounts = sorted(account_files.keys(), key=_account_dir_name_sort_key)
+    for source_name in source_accounts:
+        files_map = account_files[source_name]
+        auth_content = files_map.get("kiro-auth-token.json")
+        if not auth_content:
+            skipped.append(
+                ImportedAccountResult(
+                    source_account=source_name,
+                    status="skipped",
+                    reason="缺少 kiro-auth-token.json",
+                )
+            )
+            continue
+
+        try:
+            auth_data = json.loads(auth_content)
+        except json.JSONDecodeError:
+            skipped.append(
+                ImportedAccountResult(
+                    source_account=source_name,
+                    status="skipped",
+                    reason="kiro-auth-token.json 不是有效 JSON",
+                )
+            )
+            continue
+
+        if "refreshToken" not in auth_data and "accessToken" not in auth_data:
+            skipped.append(
+                ImportedAccountResult(
+                    source_account=source_name,
+                    status="skipped",
+                    reason="kiro-auth-token.json 缺少 refreshToken/accessToken",
+                )
+            )
+            continue
+
+        client_id_override = None
+        client_secret_override = None
+        device_filename = None
+        device_content = None
+        client_id_hash = auth_data.get("clientIdHash")
+        if client_id_hash:
+            candidate = f"{client_id_hash}.json"
+            if candidate in files_map:
+                device_filename = candidate
+                device_content = files_map[candidate]
+                try:
+                    dev_data = json.loads(device_content)
+                    client_id_override = dev_data.get("clientId")
+                    client_secret_override = dev_data.get("clientSecret")
+                except json.JSONDecodeError:
+                    skipped.append(
+                        ImportedAccountResult(
+                            source_account=source_name,
+                            status="skipped",
+                            reason=f"{candidate} 不是有效 JSON",
+                        )
+                    )
+                    continue
+
+        new_name = _next_account_dir_name(base_dir)
+        new_dir = base_dir / new_name
+        new_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            target_auth = new_dir / "kiro-auth-token.json"
+            target_auth.write_bytes(auth_content)
+            if device_filename and device_content:
+                (new_dir / device_filename).write_bytes(device_content)
+
+            from kiro.auth import KiroAuthManager
+
+            auth_manager = KiroAuthManager(
+                profile_arn=PROFILE_ARN if PROFILE_ARN else None,
+                region=REGION,
+                creds_file=str(target_auth),
+                client_id=client_id_override,
+                client_secret=client_secret_override,
+            )
+
+            new_email = await _fetch_email_for_duplicate_check(auth_manager)
+            if new_email:
+                existing = _find_existing_account_by_email(pool, new_email)
+                if existing:
+                    skipped.append(
+                        ImportedAccountResult(
+                            source_account=source_name,
+                            status="skipped",
+                            reason=f"邮箱 {new_email} 已存在于账号 {existing}",
+                        )
+                    )
+                    shutil.rmtree(new_dir, ignore_errors=True)
+                    continue
+
+            slot = AccountSlot(name=new_name, auth_manager=auth_manager)
+            await pool.add_slot(slot)
+            try:
+                await pool._check_slot_quota(slot)
+            except Exception as exc:
+                logger.warning(f"Initial quota check for '{new_name}' failed (non-fatal): {exc}")
+
+            imported.append(
+                ImportedAccountResult(
+                    source_account=source_name,
+                    imported_account=new_name,
+                    status="imported",
+                )
+            )
+        except Exception:
+            shutil.rmtree(new_dir, ignore_errors=True)
+            raise
+
+    return JSONResponse(
+        content={
+            "success": True,
+            "total": len(source_accounts),
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "imported": [item.model_dump() for item in imported],
+            "skipped": [item.model_dump() for item in skipped],
         }
     )
 
@@ -1107,7 +1517,141 @@ def _next_account_dir_name(base_dir: Path) -> str:
     return f"account-{max_n + 1}"
 
 
+def _account_dir_name_sort_key(name: str) -> tuple[int, int, str]:
+    """Natural sort for names like account-1/account-10."""
+    m = re.match(r"^account-(\d+)$", name)
+    if m:
+        return (0, int(m.group(1)), name)
+    return (1, 0, name)
 
+
+def _collect_account_files_from_zip(zf: zipfile.ZipFile) -> Dict[str, Dict[str, bytes]]:
+    """
+    Collect account json files from ZIP.
+
+    Only accepts files exactly under one top-level account directory:
+        <account_name>/<file>.json
+    """
+    account_files: Dict[str, Dict[str, bytes]] = {}
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+
+        path = info.filename.strip("/")
+        parts = path.split("/")
+        if len(parts) != 2:
+            continue
+
+        account_name, filename = parts
+        if not filename.lower().endswith(".json"):
+            continue
+
+        content = zf.read(info.filename)
+        account_files.setdefault(account_name, {})[filename] = content
+    return account_files
+
+
+def _find_existing_account_by_email(pool: AccountPool, email: str) -> Optional[str]:
+    """Find existing account name by email (case-insensitive)."""
+    normalized = email.strip().lower()
+    if not normalized:
+        return None
+    for slot in pool.slots:
+        slot_email = (slot.email or "").strip().lower()
+        if slot_email and slot_email == normalized:
+            return slot.name
+    return None
+
+
+async def _fetch_email_for_duplicate_check(
+    auth_manager: Any,
+) -> Optional[str]:
+    """
+    Try to fetch account email for duplicate checking before importing.
+
+    Returns None if quota API is unavailable or email is absent.
+    """
+    try:
+        from kiro.quota_checker import check_quota
+
+        access_token = await auth_manager.get_access_token()
+        provider = getattr(auth_manager, "_provider", "BuilderId")
+        quota = await check_quota(access_token, provider)
+        return quota.email or None
+    except Exception as exc:
+        logger.warning(f"Email pre-check skipped due to quota lookup failure: {exc}")
+        return None
+
+
+def _resolve_host_cache_files(host_cache_dir: Path) -> Tuple[Path, Optional[Path], Dict[str, Any]]:
+    """
+    Resolve importable credential files from host SSO cache directory.
+
+    Args:
+        host_cache_dir: Host cache directory path
+
+    Returns:
+        Tuple of (auth_path, device_reg_path, auth_data)
+    """
+    auth_path = host_cache_dir / "kiro-auth-token.json"
+    if not auth_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Required file not found in host cache: {auth_path.name}",
+        )
+
+    try:
+        with open(auth_path, "r", encoding="utf-8") as f:
+            auth_data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid JSON in {auth_path.name}: {exc}",
+        )
+
+    if "refreshToken" not in auth_data and "accessToken" not in auth_data:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{auth_path.name} must contain 'refreshToken' or 'accessToken'",
+        )
+
+    device_reg_path: Optional[Path] = None
+    client_id_hash = auth_data.get("clientIdHash")
+    if client_id_hash:
+        candidate = host_cache_dir / f"{client_id_hash}.json"
+        if candidate.exists():
+            device_reg_path = candidate
+        else:
+            logger.warning(
+                "Host cache import: '{}' references missing device file '{}'",
+                auth_path.name,
+                candidate.name,
+            )
+
+    return auth_path, device_reg_path, auth_data
+
+
+def _delete_host_cache_files(auth_path: Path, device_reg_path: Optional[Path]) -> list[str]:
+    """
+    Delete host cache source files after successful import.
+
+    Args:
+        auth_path: Path to kiro-auth-token.json in host cache
+        device_reg_path: Optional path to {clientIdHash}.json in host cache
+
+    Returns:
+        List of deleted filenames
+    """
+    deleted: list[str] = []
+    for file_path in (auth_path, device_reg_path):
+        if not file_path or not file_path.exists():
+            continue
+        try:
+            file_path.unlink()
+            deleted.append(file_path.name)
+        except Exception as exc:
+            logger.warning(f"Failed to delete imported source file '{file_path}': {exc}")
+    return deleted
 
 
 async def _reinit_pool(request: Request) -> None:

@@ -8,6 +8,8 @@ let autoScroll = true;
 let activeLevels = new Set(['DEBUG','INFO','SUCCESS','WARNING','ERROR','CRITICAL']);
 let configDraft = {};   // section → key → value (only modified values)
 let logCount = 0;
+let selectedAccounts = new Set();
+let currentAccounts = [];
 
 const BASE = window.location.origin;
 
@@ -123,6 +125,8 @@ function renderDashboard(data) {
   document.getElementById('last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString();
 
   const accounts = data.accounts || [];
+  currentAccounts = accounts;
+  selectedAccounts = new Set([...selectedAccounts].filter(name => accounts.some(a => a.name === name)));
   document.getElementById('account-count').textContent = `(共 ${accounts.length} 个)`;
 
   const grid = document.getElementById('account-grid');
@@ -154,6 +158,8 @@ function updateDashboardFromStatus(data) {
   document.getElementById('last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString();
 
   const accounts = data.accounts || [];
+  currentAccounts = accounts;
+  selectedAccounts = new Set([...selectedAccounts].filter(name => accounts.some(a => a.name === name)));
   document.getElementById('account-count').textContent = `(共 ${accounts.length} 个)`;
 
   const grid = document.getElementById('account-grid');
@@ -278,11 +284,21 @@ function renderAccountCard(a) {
     ? `<span class="host-active-badge" title="主机当前正在使用此账号">🏠 当前选用</span>` 
     : '';
 
+  const checkboxHtml = `
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)">
+      <input type="checkbox" ${selectedAccounts.has(a.name) ? 'checked' : ''} onchange="toggleAccountSelect('${escAttr(a.name)}', this.checked)">
+      选择
+    </label>
+  `;
+
   return `
     <div class="account-card status-${status} ${a.is_active_on_host ? 'active-host' : ''}" id="card-${escAttr(a.name)}">
       <div class="card-top" style="flex-direction: column; align-items: stretch; gap: 6px; margin-bottom: 14px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <div class="card-name" style="margin-bottom: 0">📁 ${escHtml(a.name)}</div>
+          <div style="display:flex; align-items:center; gap:10px;">
+            ${checkboxHtml}
+            <div class="card-name" style="margin-bottom: 0">📁 ${escHtml(a.name)}</div>
+          </div>
           <div style="display: flex; align-items: center; gap: 6px;">
             ${activeHostBadge}
             <span class="status-badge ${badgeCls}">${badgeTxt}</span>
@@ -314,6 +330,88 @@ function renderAccountCard(a) {
       ${filesHtml}
     </div>
   `;
+}
+
+function toggleAccountSelect(name, checked) {
+  if (checked) selectedAccounts.add(name);
+  else selectedAccounts.delete(name);
+}
+
+function toggleSelectAllAccounts() {
+  const allNames = (currentAccounts || []).map(a => a.name);
+  if (!allNames.length) {
+    showToast('暂无可选择账号', 'warning');
+    return;
+  }
+  const allSelected = allNames.every(name => selectedAccounts.has(name));
+  if (allSelected) {
+    selectedAccounts.clear();
+    showToast('已取消全选', 'info');
+  } else {
+    allNames.forEach(name => selectedAccounts.add(name));
+    showToast(`已全选 ${allNames.length} 个账号`, 'success');
+  }
+  loadDashboard();
+}
+
+async function exportSelectedAccountsZip() {
+  const accountNames = [...selectedAccounts];
+  if (!accountNames.length) {
+    showToast('请先勾选要导出的账号', 'warning');
+    return;
+  }
+
+  const ok = await showConfirm({
+    title: '确认批量导出？',
+    message: `将导出 ${accountNames.length} 个账号到 ZIP 文件。`,
+    okText: '开始导出',
+    type: 'primary'
+  });
+  if (!ok) return;
+
+  const shouldDelete = window.confirm(
+    '导出成功后，是否删除这些已导出的账号？\n\n确定=删除账号；取消=保留账号。'
+  );
+
+  try {
+    const r = await apiFetch('/admin/accounts/export-zip', {
+      method: 'POST',
+      body: JSON.stringify({
+        account_names: accountNames,
+        delete_exported_accounts: shouldDelete
+      })
+    });
+
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      showToast(data.detail || '批量导出失败', 'error');
+      return;
+    }
+
+    const blob = await r.blob();
+    const url = window.URL.createObjectURL(blob);
+    const contentDisposition = r.headers.get('Content-Disposition') || '';
+    const match = contentDisposition.match(/filename="([^"]+)"/);
+    const filename = (match && match[1]) ? match[1] : `kiro-accounts-${Date.now()}.zip`;
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    a.remove();
+
+    if (shouldDelete) {
+      selectedAccounts.clear();
+      showToast(`导出成功并已删除 ${accountNames.length} 个账号`, 'success');
+    } else {
+      showToast(`导出成功，共 ${accountNames.length} 个账号`, 'success');
+    }
+    loadDashboard();
+  } catch (e) {
+    showToast('网络错误', 'error');
+  }
 }
 
 async function downloadAccountFile(accountName, fileName) {
@@ -391,6 +489,39 @@ async function refreshAllQuotas() {
   }
 }
 
+async function autoImportHostCacheAccount() {
+  const shouldImport = await showConfirm({
+    title: '自动获取 Kiro 账号？',
+    message: '将从当前主机 SSO cache 目录读取凭证并自动添加到账号列表。',
+    okText: '开始获取',
+    type: 'primary'
+  });
+  if (!shouldImport) return;
+
+  const shouldDeleteSource = window.confirm(
+    '导入成功后，是否自动删除主机 SSO cache 中的这两个 JSON 文件？\n\n选择“确定”会删除，方便你重新注册 Kiro 账号。'
+  );
+
+  try {
+    const r = await apiFetch('/admin/accounts/import-host-cache', {
+      method: 'POST',
+      body: JSON.stringify({ delete_source_files: shouldDeleteSource })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(data.detail || '自动获取失败', 'error');
+      return;
+    }
+
+    const deleted = Array.isArray(data.deleted_source_files) ? data.deleted_source_files.length : 0;
+    const suffix = deleted > 0 ? `，并已删除源文件 ${deleted} 个` : '';
+    showToast(`已自动添加账号 ${data.account_name}${suffix}`, 'success');
+    loadDashboard();
+  } catch (e) {
+    showToast('网络错误', 'error');
+  }
+}
+
 async function switchHostAccount(name) {
   const ok = await showConfirm({
     title: '确认切换本地账号？',
@@ -440,6 +571,7 @@ function closeAddModal() {
   document.getElementById('add-error').textContent = '';
   resetDrop('auth-drop', 'auth-file');
   resetDrop('dev-drop',  'dev-file');
+  resetDrop('zip-drop',  'zip-file');
 }
 
 function onDragOver(e, id)  { e.preventDefault(); document.getElementById(id).classList.add('drag'); }
@@ -487,6 +619,52 @@ async function submitAddAccount() {
     closeAddModal(); loadDashboard();
   } catch (e) { errEl.textContent = '❌ 网络错误'; }
   finally { btn.disabled = false; btn.textContent = '添加账号'; }
+}
+
+async function submitImportZipAccounts() {
+  const zipFile = document.getElementById('zip-file').files[0];
+  const errEl = document.getElementById('add-error');
+  const btn = document.getElementById('import-zip-btn');
+  if (!zipFile) {
+    errEl.textContent = '请先选择账号 ZIP 包';
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('zip_file', zipFile, zipFile.name);
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+  errEl.textContent = '';
+
+  try {
+    const r = await fetch(BASE + '/admin/accounts/import-zip', {
+      method: 'POST',
+      headers: { 'X-Admin-Key': apiKey },
+      body: fd
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      errEl.textContent = '❌ ' + (data.detail || 'ZIP 导入失败');
+      return;
+    }
+
+    const imported = data.imported_count ?? 0;
+    const skipped = data.skipped_count ?? 0;
+    if (skipped > 0) {
+      const firstReason = data.skipped?.[0]?.reason ? `，示例：${data.skipped[0].reason}` : '';
+      showToast(`ZIP导入完成：成功 ${imported}，跳过 ${skipped}${firstReason}`, 'warning');
+    } else {
+      showToast(`ZIP导入成功：共 ${imported} 个账号`, 'success');
+    }
+
+    closeAddModal();
+    loadDashboard();
+  } catch (e) {
+    errEl.textContent = '❌ 网络错误';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '导入ZIP';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
