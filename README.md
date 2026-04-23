@@ -57,6 +57,10 @@
 2. **一键启动**：
    ```bash
    docker compose up -d
+   
+   mkdir -p ./kiro-accounts
+   chown -R 999:999 ./kiro-accounts
+   chmod -R u+rwX,g+rwX ./kiro-accounts
    ```
 3. **查看效果**：
    - 管理后台：`http://localhost:8000/admin`

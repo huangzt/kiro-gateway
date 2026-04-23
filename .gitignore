@@ -37,3 +37,5 @@ sso/kiro-auth-token.json
 .claude/settings.local.json
 kiro-accounts*/
 .remember/
+deploy-gost.sh
+deploy-kiro-gateway.sh

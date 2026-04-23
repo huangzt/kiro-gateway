@@ -1,0 +1,120 @@
+# docker compose -f docker-compose-https.yml up --build -d
+# docker compose -f docker-compose-https.yml up -d
+# docker compose -f docker-compose-https.yml down
+# docker compose -f docker-compose-https.yml restart
+services:
+  kiro-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kiro-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      # Server configuration
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      
+      # Required: Set your proxy API key
+      # You can also use .env file (see env_file below)
+      - PROXY_API_KEY=${PROXY_API_KEY:-my-super-secret-password-123}
+      
+      # Authentication (choose one method)
+      # Option 1: Refresh token
+      - REFRESH_TOKEN=${REFRESH_TOKEN:-}
+      
+      # Option 2: Profile ARN (optional, for Kiro IDE)
+      - PROFILE_ARN=${PROFILE_ARN:-}
+      
+      # Option 3: Credentials file path (mounted as volume below)
+      - KIRO_CREDS_FILE=${KIRO_CREDS_FILE:-}
+      
+      # Option 4: kiro-cli SQLite database (mounted as volume below)
+      - KIRO_CLI_DB_FILE=${KIRO_CLI_DB_FILE:-}
+      
+      # Optional settings
+      - KIRO_REGION=${KIRO_REGION:-us-east-1}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG_MODE=${DEBUG_MODE:-off}
+      
+      # Multi-account pool (queue mode, prevents 429 rate limiting)
+      # Set KIRO_MULTI_CREDS_DIR to a directory containing account subdirectories
+      # Each account processes requests serially; concurrency = number of accounts
+      - KIRO_MULTI_CREDS_DIR=${KIRO_MULTI_CREDS_DIR:-}
+      - QUEUE_TIMEOUT=${QUEUE_TIMEOUT:-300}
+      - COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-300}
+
+      # Dynamic account switching (Host mapping)
+      - KIRO_HOST_CACHE_DIR=${KIRO_HOST_CACHE_DIR:-}
+      
+      # VPN/Proxy settings (for restricted networks)
+      - VPN_PROXY_URL=${VPN_PROXY_URL:-}
+    
+    # Alternative: Load all variables from .env file
+    env_file:
+      - .env
+    
+    volumes:
+      # Mount credentials file (if using KIRO_CREDS_FILE)
+      # Uncomment and adjust path as needed:
+      # - ./sso:/home/kiro/.aws/sso/cache
+      
+      # Mount kiro-cli database (if using KIRO_CLI_DB_FILE)
+      # Uncomment and adjust path as needed:
+      # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli
+      
+      # Mount multi-account credentials directory (if using KIRO_MULTI_CREDS_DIR)
+      # Uncomment and adjust path as needed:
+      - ./kiro-accounts:/home/kiro/.kiro-accounts
+      - ./kiro/static:/app/kiro/static
+      
+      # Mount debug logs directory (optional, for debugging)
+      - ./debug_logs:/app/debug_logs
+
+      # Mount gateway.yml for hot-reload config persistence (Admin UI)
+      # Config changes via Admin UI are persisted here across container restarts
+      - ./gateway.yml:/app/gateway.yml
+
+      # Host AWS SSO cache mapping (Required for Admin UI "Switch Account" feature)
+      # Map your host's AWS cache directory to /app/host_aws_cache in container
+      # macOS/Linux: ~/.aws/sso/cache:/app/host_aws_cache:rw
+      # Windows Example: ${USERPROFILE}/.aws/sso/cache:/app/host_aws_cache:rw
+      - ~/.aws/sso/cache:/app/host_aws_cache:rw
+    
+    restart: unless-stopped
+    
+    # Health check
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 5s
+    
+    # Resource limits (recommended for production)
+    # Adjust based on your workload and available resources
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'        # Maximum CPU cores (streaming can be CPU-intensive)
+    #       memory: 1G       # Maximum memory (sufficient for FastAPI + streaming)
+    #     reservations:
+    #       cpus: '0.5'      # Minimum guaranteed CPU
+    #       memory: 256M     # Minimum guaranteed memory
+
+  nginx:
+    image: nginx:alpine
+    container_name: kiro-gateway-nginx
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/gost/proxy.crt:/etc/ssl/kiro-gateway.crt:ro
+      - /etc/gost/proxy.key:/etc/ssl/kiro-gateway.key:ro
+    depends_on:
+      - kiro-gateway
+
+networks:
+  default:
+    name: kiro-gateway-network
