@@ -173,7 +173,15 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 #         kiro-auth-token.json
 #
 # Set to empty string to disable multi-account mode (default).
-_raw_multi_creds_dir = _get_raw_env_value("KIRO_MULTI_CREDS_DIR") or os.getenv("KIRO_MULTI_CREDS_DIR", "")
+# IMPORTANT: Prefer real environment variables over .env file so tests and
+# deployments can override local developer .env without editing files.
+# Treat an explicit empty string as "disabled" (do NOT fall back to .env).
+_env_multi_creds_dir = os.getenv("KIRO_MULTI_CREDS_DIR")
+_raw_multi_creds_dir = (
+    _env_multi_creds_dir
+    if _env_multi_creds_dir is not None
+    else (_get_raw_env_value("KIRO_MULTI_CREDS_DIR") or "")
+)
 KIRO_MULTI_CREDS_DIR: str = str(Path(_raw_multi_creds_dir)) if _raw_multi_creds_dir else ""
 
 # Directory containing the host's AWS SSO cache.
@@ -189,7 +197,12 @@ KIRO_MULTI_CREDS_DIR: str = str(Path(_raw_multi_creds_dir)) if _raw_multi_creds_
 #   volumes:
 #     - ~/.aws/sso/cache:/app/host_aws_cache:rw
 #
-_raw_host_cache_dir = _get_raw_env_value("KIRO_HOST_CACHE_DIR") or os.getenv("KIRO_HOST_CACHE_DIR", "")
+_env_host_cache_dir = os.getenv("KIRO_HOST_CACHE_DIR")
+_raw_host_cache_dir = (
+    _env_host_cache_dir
+    if _env_host_cache_dir is not None
+    else (_get_raw_env_value("KIRO_HOST_CACHE_DIR") or "")
+)
 KIRO_HOST_CACHE_DIR: str = str(Path(_raw_host_cache_dir)) if _raw_host_cache_dir else ""
 
 # Queue timeout in seconds for acquiring an account slot.

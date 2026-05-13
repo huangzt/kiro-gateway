@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.security import APIKeyHeader
@@ -1706,6 +1707,12 @@ async def _reinit_pool(request: Request) -> None:
     # Swap the pool (old pool continues draining active requests)
     request.app.state.account_pool = new_pool
 
+    # Link broadcaster and admin_config to new pool
+    broadcaster = getattr(request.app.state, "log_broadcaster", None)
+    if broadcaster:
+        new_pool._broadcaster = broadcaster
+    new_pool._admin_config = admin_cfg
+
     # Update auth_manager for backward compatibility
     if new_pool.size > 0:
         request.app.state.auth_manager = new_pool.slots[0].auth_manager
@@ -1716,3 +1723,103 @@ async def _reinit_pool(request: Request) -> None:
     # Initial quota check in background
     asyncio.create_task(new_pool.initialize_quota())
     logger.info("Account pool reinitialized, quota check started in background")
+
+
+# ---------------------------------------------------------------------------
+# Model Controls - Per-plan model enable/disable management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/models/control", dependencies=[Depends(verify_admin_key)])
+async def get_model_controls(request: Request) -> JSONResponse:
+    """
+    Get model control configuration and available models grouped by plan type.
+
+    Returns:
+        - controls: {plan_type: {model_id: bool}}
+        - plan_types: list[str]
+        - models_by_plan: {plan_type: list[model_id]}
+    """
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    pool: AccountPool = request.app.state.account_pool
+
+    controls = admin_cfg.get_model_controls()
+
+    plan_types: set[str] = set()
+    for slot in pool.slots:
+        if slot.quota_info and slot.quota_info.subscription_plan:
+            plan_types.add(slot.quota_info.subscription_plan)
+
+    models_by_plan: Dict[str, List[str]] = {}
+    for plan_type in plan_types:
+        sample_slot = next(
+            (
+                s
+                for s in pool.slots
+                if s.quota_info and s.quota_info.subscription_plan == plan_type
+            ),
+            None,
+        )
+        if not sample_slot:
+            models_by_plan[plan_type] = []
+            continue
+
+        try:
+            access_token = await sample_slot.auth_manager.get_access_token()
+            models = await _fetch_available_models(sample_slot.auth_manager, access_token)
+            models_by_plan[plan_type] = [m.get("modelId", "") for m in models if m.get("modelId")]
+        except Exception as exc:
+            logger.warning(f"Failed to fetch models for {plan_type}: {exc}")
+            models_by_plan[plan_type] = []
+
+    return JSONResponse(
+        {
+            "controls": controls,
+            "plan_types": sorted(plan_types),
+            "models_by_plan": models_by_plan,
+        }
+    )
+
+
+@router.post("/models/control", dependencies=[Depends(verify_admin_key)])
+async def save_model_controls(request: Request) -> JSONResponse:
+    """
+    Save model control configuration to gateway.yml.
+
+    Body:
+        {"controls": {plan_type: {model_id: bool}}}
+    """
+    body = await request.json()
+    controls = body.get("controls", {})
+    if not isinstance(controls, dict):
+        raise HTTPException(status_code=400, detail="controls must be a dictionary")
+
+    admin_cfg: AdminConfig = request.app.state.admin_config
+    admin_cfg.set_model_controls(controls)
+    await admin_cfg.save()
+
+    logger.info("Model controls saved")
+    return JSONResponse({"success": True})
+
+
+async def _fetch_available_models(auth_manager: Any, access_token: str) -> list[dict]:
+    """
+    Fetch available models from Kiro API.
+    """
+    from kiro.utils import get_kiro_headers
+    from kiro.auth import AuthType
+
+    headers = get_kiro_headers(auth_manager, access_token)
+    params: Dict[str, Any] = {"origin": "AI_EDITOR"}
+    if auth_manager.auth_type == AuthType.KIRO_DESKTOP and auth_manager.profile_arn:
+        params["profileArn"] = auth_manager.profile_arn
+
+    list_models_url = f"{auth_manager.q_host}/ListAvailableModels"
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(list_models_url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        models = data.get("models", [])
+        if isinstance(models, list):
+            return models
+        return []

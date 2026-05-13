@@ -64,6 +64,7 @@ class QuotaInfo:
         trial_active: Whether the free trial is currently active
         trial_expiry: Free trial expiry date string (empty if no trial)
         next_reset: Next monthly quota reset date
+        overage_enabled: Whether overage mode is enabled (allows usage beyond quota)
         checked_at: Monotonic timestamp when this info was fetched
     """
 
@@ -77,6 +78,7 @@ class QuotaInfo:
     trial_active: bool = False
     trial_expiry: str = ""
     next_reset: str = ""
+    overage_enabled: bool = False
     checked_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -141,6 +143,17 @@ def _parse_usage_response(data: dict) -> QuotaInfo:
     # Subscription info
     sub_info = data.get("subscriptionInfo", {})
     info.subscription_plan = sub_info.get("subscriptionTitle", "")
+
+    # Overage mode (allows usage beyond quota when enabled)
+    # The overageEnabled field is in data['overageConfiguration']['overageEnabled']
+    overage_config = data.get("overageConfiguration", {})
+    overage_enabled = overage_config.get("overageEnabled", False)
+
+    # Handle string boolean values (e.g., "true"/"false")
+    if isinstance(overage_enabled, str):
+        overage_enabled = overage_enabled.lower() == "true"
+
+    info.overage_enabled = bool(overage_enabled)
 
     # Reset date
     info.next_reset = str(data.get("nextDateReset", ""))

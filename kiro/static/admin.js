@@ -87,6 +87,7 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('add-fab').style.display = name === 'dashboard' ? '' : 'none';
   if (name === 'config') loadConfig();
+  if (name === 'models') refreshModelControls();
   if (name === 'logs' && !sseAbortController) startSSE();
 }
 
@@ -307,6 +308,7 @@ function renderAccountCard(a) {
         <div class="card-email" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${escHtml(a.email || '邮箱未知')}
           ${a.quota?.plan ? ` · <span style="color:var(--text3); font-weight:500; font-size:11px">${escHtml(a.quota.plan)}</span>` : ''}
+          ${a.quota?.overage_enabled ? ` · <span class="overage-badge" title="已开启超支模式，配额用尽后仍可继续使用">💳 超支开启</span>` : ''}
         </div>
       </div>
       ${quotaHtml}
@@ -1144,3 +1146,109 @@ renderDashboard = function(data) {
   
   document.getElementById('drawer-last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString();
 };
+
+// ═══════════════════════════════════════════════════════════
+// Models Control
+// ═══════════════════════════════════════════════════════════
+let modelControls = {};
+
+async function refreshModelControls() {
+  const loading = document.getElementById('models-loading');
+  const content = document.getElementById('models-content');
+  if (!loading || !content) return;
+
+  loading.style.display = '';
+  content.style.display = 'none';
+
+  try {
+    const r = await apiFetch('/admin/models/control');
+    if (r.status === 401) { doLogout(); return; }
+    if (!r.ok) {
+      showToast('获取模型控制数据失败', 'error');
+      loading.innerHTML = '<div class="empty-icon">❌</div><div class="empty-title">加载失败</div><div class="empty-sub">无法获取模型列表</div>';
+      return;
+    }
+
+    const data = await r.json();
+    modelControls = data.controls || {};
+
+    const planTypes = data.plan_types || [];
+    const modelsByPlan = data.models_by_plan || {};
+
+    if (planTypes.length === 0) {
+      loading.innerHTML = '<div class="empty-icon">🤖</div><div class="empty-title">暂无账号</div><div class="empty-sub">请先添加账号后再管理模型</div>';
+      return;
+    }
+
+    let html = '';
+    planTypes.forEach(planType => {
+      const models = modelsByPlan[planType] || [];
+      html += `
+        <div class="model-section">
+          <div class="model-section-header">
+            <div class="model-section-title">
+              <span class="plan-badge" data-plan="${escAttr(planType)}">${escHtml(planType)}</span>
+              <span style="font-size:14px;font-weight:600;color:var(--text)">可用模型</span>
+            </div>
+            <span class="model-section-count">${models.length} 个模型</span>
+          </div>
+          <div class="model-list" data-plan="${escAttr(planType)}">
+            ${models.map(modelId => `
+              <div class="model-item">
+                <span class="model-name" title="${escAttr(modelId)}">${escHtml(modelId)}</span>
+                <button class="model-toggle ${modelControls[planType]?.[modelId] ? 'active' : ''}"
+                  data-plan="${escAttr(planType)}" data-model="${escAttr(modelId)}"
+                  onclick="toggleModelControl(this)"></button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    });
+
+    content.innerHTML = html;
+    loading.style.display = 'none';
+    content.style.display = '';
+  } catch (e) {
+    console.error('Error loading model controls:', e);
+    showToast('加载模型控制失败', 'error');
+    loading.innerHTML = '<div class="empty-icon">❌</div><div class="empty-title">加载失败</div><div class="empty-sub">网络错误</div>';
+  }
+}
+
+function toggleModelControl(btn) {
+  const planType = btn.dataset.plan;
+  const modelId = btn.dataset.model;
+
+  if (!modelControls[planType]) modelControls[planType] = {};
+
+  modelControls[planType][modelId] = !modelControls[planType][modelId];
+  btn.classList.toggle('active', modelControls[planType][modelId]);
+}
+
+async function saveModelControls() {
+  const statusEl = document.getElementById('models-save-status');
+  if (statusEl) statusEl.textContent = '保存中…';
+
+  try {
+    const r = await apiFetch('/admin/models/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ controls: modelControls })
+    });
+
+    if (r.status === 401) { doLogout(); return; }
+    if (r.ok) {
+      showToast('模型配置已保存', 'success');
+      if (statusEl) statusEl.textContent = '已保存';
+      setTimeout(() => { if (statusEl) statusEl.textContent = '准备就绪'; }, 1200);
+    } else {
+      showToast('保存失败', 'error');
+      if (statusEl) statusEl.textContent = '保存失败';
+    }
+  } catch (e) {
+    console.error('Error saving model controls:', e);
+    showToast('保存失败', 'error');
+    if (statusEl) statusEl.textContent = '保存失败';
+  }
+}

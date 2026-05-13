@@ -39,3 +39,4 @@ kiro-accounts*/
 .remember/
 deploy-gost.sh
 deploy-kiro-gateway.sh
+.DS_Store

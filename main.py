@@ -351,7 +351,8 @@ async def lifespan(app: FastAPI):
     # ==========================================================================
     # AdminConfig — load gateway.yml hot-reload config
     # ==========================================================================
-    admin_config = AdminConfig("gateway.yml")
+    gateway_yml_path = os.getenv("GATEWAY_YML_PATH", "gateway.yml")
+    admin_config = AdminConfig(gateway_yml_path)
     app.state.admin_config = admin_config
 
     # ==========================================================================
@@ -466,6 +467,7 @@ async def lifespan(app: FastAPI):
 
     # Link broadcaster to account pool for real-time status updates
     account_pool._broadcaster = broadcaster
+    account_pool._admin_config = admin_config
 
     # For backward compatibility, expose the first auth_manager as app.state.auth_manager
     # This is used by /v1/models endpoint and other places that need a single auth_manager

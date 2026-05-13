@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: kiro-gateway
+    container_name: kiro-gateway-hzt
     ports:
       - "8000:8000"
     environment:

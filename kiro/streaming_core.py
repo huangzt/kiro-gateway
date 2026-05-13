@@ -38,12 +38,23 @@ import httpx
 from loguru import logger
 
 from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, deduplicate_tool_calls
-from kiro.config import (
-    FIRST_TOKEN_TIMEOUT,
-    FIRST_TOKEN_MAX_RETRIES,
-    is_fake_reasoning_enabled,
-    get_fake_reasoning_handling,
-)
+from typing import Any
+
+from kiro.config import FIRST_TOKEN_MAX_RETRIES, FIRST_TOKEN_TIMEOUT, get_fake_reasoning_handling, is_fake_reasoning_enabled
+
+# --------------------------------------------------------------------------------------
+# Testing hooks
+# --------------------------------------------------------------------------------------
+# Unit tests patch this module-level variable directly to force-enable/disable
+# thinking parsing behavior in streaming.
+_USE_GATEWAY_CONFIG: object = object()
+FAKE_REASONING_ENABLED: Any = _USE_GATEWAY_CONFIG
+
+
+def _effective_fake_reasoning_enabled() -> bool:
+    if FAKE_REASONING_ENABLED is _USE_GATEWAY_CONFIG:
+        return is_fake_reasoning_enabled()
+    return bool(FAKE_REASONING_ENABLED)
 from kiro.thinking_parser import ThinkingParser
 
 if TYPE_CHECKING:
@@ -142,7 +153,7 @@ async def parse_kiro_stream(
     
     # Initialize thinking parser if fake reasoning is enabled
     thinking_parser: Optional[ThinkingParser] = None
-    if is_fake_reasoning_enabled() and enable_thinking_parser:
+    if _effective_fake_reasoning_enabled() and enable_thinking_parser:
         handling_mode = get_fake_reasoning_handling()
         thinking_parser = ThinkingParser(handling_mode=handling_mode)
         logger.debug(f"Thinking parser initialized with mode: {handling_mode}")

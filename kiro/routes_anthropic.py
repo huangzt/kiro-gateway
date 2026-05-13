@@ -44,6 +44,7 @@ from kiro.models_anthropic import (
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
+from kiro.model_resolver import ModelResolver
 from kiro.account_pool import AccountPool, AccountSlot
 from kiro.converters_anthropic import anthropic_to_kiro
 from kiro.streaming_anthropic import (
@@ -148,14 +149,22 @@ async def messages(
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")
     
-    # Acquire account from pool (queue mode - waits if all accounts busy)
+    # Resolve model name to internal ID for model control
+    model_resolver: ModelResolver = request.app.state.model_resolver
+    model_resolution = model_resolver.resolve(request_data.model)
+    internal_model_id = model_resolution.internal_id
+
+    # Acquire account from pool with model control (queue mode - waits if all accounts busy)
     account_pool: AccountPool = request.app.state.account_pool
     slot: AccountSlot = None
     try:
-        slot = await account_pool.acquire(timeout=QUEUE_TIMEOUT)
+        slot = await account_pool.acquire_for_model(
+            model_id=internal_model_id,
+            timeout=QUEUE_TIMEOUT,
+        )
     except asyncio.TimeoutError:
         logger.warning(
-            f"Queue timeout: all {account_pool.size} account(s) busy, "
+            f"Queue timeout: all {account_pool.size} account(s) busy or model '{internal_model_id}' not available, "
             f"waited {QUEUE_TIMEOUT}s"
         )
         return JSONResponse(
@@ -165,8 +174,8 @@ async def messages(
                 "error": {
                     "type": "rate_limit_error",
                     "message": (
-                        f"All {account_pool.size} account(s) are busy. "
-                        f"Request queued for {QUEUE_TIMEOUT}s but no account became available. "
+                        f"All {account_pool.size} account(s) are busy or model '{internal_model_id}' is not enabled. "
+                        f"Request queued for {QUEUE_TIMEOUT}s but no suitable account became available. "
                         f"Please retry later or add more accounts."
                     )
                 }

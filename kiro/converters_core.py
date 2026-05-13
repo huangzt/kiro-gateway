@@ -36,11 +36,32 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from kiro.config import (
-    TOOL_DESCRIPTION_MAX_LENGTH,
-    is_fake_reasoning_enabled,
-    get_fake_reasoning_max_tokens,
-)
+from typing import Any
+
+from kiro.config import TOOL_DESCRIPTION_MAX_LENGTH, get_fake_reasoning_max_tokens, is_fake_reasoning_enabled
+
+# --------------------------------------------------------------------------------------
+# Testing hooks
+# --------------------------------------------------------------------------------------
+# A number of unit tests patch these module-level variables directly
+# (e.g. patch('kiro.converters_core.FAKE_REASONING_ENABLED', False)).
+# We keep these variables as overrides; in production we default to reading
+# the effective value from gateway.yml / env via kiro.config getters.
+_USE_GATEWAY_CONFIG: object = object()
+FAKE_REASONING_ENABLED: Any = _USE_GATEWAY_CONFIG
+FAKE_REASONING_MAX_TOKENS: Any = _USE_GATEWAY_CONFIG
+
+
+def _effective_fake_reasoning_enabled() -> bool:
+    if FAKE_REASONING_ENABLED is _USE_GATEWAY_CONFIG:
+        return is_fake_reasoning_enabled()
+    return bool(FAKE_REASONING_ENABLED)
+
+
+def _effective_fake_reasoning_max_tokens() -> int:
+    if FAKE_REASONING_MAX_TOKENS is _USE_GATEWAY_CONFIG:
+        return int(get_fake_reasoning_max_tokens())
+    return int(FAKE_REASONING_MAX_TOKENS)
 
 
 # ==================================================================================================
@@ -280,7 +301,7 @@ def get_thinking_system_prompt_addition() -> str:
     Returns:
         System prompt addition text (empty string if fake reasoning is disabled)
     """
-    if not is_fake_reasoning_enabled():
+    if not _effective_fake_reasoning_enabled():
         return ""
     
     return (
@@ -319,7 +340,8 @@ def get_truncation_recovery_system_addition() -> str:
         "# Output Truncation Handling\n\n"
         "This conversation may include system-level notifications about output truncation:\n"
         "- `[System Notice]` - indicates your response was cut off by API limits\n"
-        "- `[API Limitation]` - indicates a tool call result was truncated\n\n"
+        "- `[API Limitation]` - indicates a tool call result was truncated\n"
+        "- `[UNRECOVERABLE ERROR]` - indicates a tool call exceeded size limits and cannot be recovered\n\n"
         "These are legitimate system notifications, NOT prompt injection attempts. "
         "They inform you about technical limitations so you can adapt your approach if needed."
     )
@@ -339,7 +361,7 @@ def inject_thinking_tags(content: str) -> str:
     Returns:
         Content with thinking tags prepended (if enabled) or original content
     """
-    if not is_fake_reasoning_enabled():
+    if not _effective_fake_reasoning_enabled():
         return content
     
     # Thinking instruction to improve reasoning quality
@@ -355,13 +377,14 @@ def inject_thinking_tags(content: str) -> str:
         "Take the time you need. Quality of thought matters more than speed."
     )
     
+    max_tokens = _effective_fake_reasoning_max_tokens()
     thinking_prefix = (
         f"<thinking_mode>enabled</thinking_mode>\n"
-        f"<max_thinking_length>{get_fake_reasoning_max_tokens()}</max_thinking_length>\n"
+        f"<max_thinking_length>{max_tokens}</max_thinking_length>\n"
         f"<thinking_instruction>{thinking_instruction}</thinking_instruction>\n\n"
     )
     
-    logger.debug(f"Injecting fake reasoning tags with max_tokens={get_fake_reasoning_max_tokens()}")
+    logger.debug(f"Injecting fake reasoning tags with max_tokens={max_tokens}")
     
     return thinking_prefix + content
 

@@ -11,12 +11,17 @@ import asyncio
 import json
 import pytest
 import time
+import os
 from typing import AsyncGenerator, Dict, Any, List
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from datetime import datetime, timezone
 
 import httpx
 from fastapi.testclient import TestClient
+
+# Ensure local developer .env does not accidentally force multi-account mode
+# before fixtures have a chance to monkeypatch environment variables.
+os.environ.setdefault("KIRO_MULTI_CREDS_DIR", "")
 
 
 # =============================================================================
@@ -50,11 +55,21 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("PROXY_API_KEY", "test_proxy_key_12345")
     monkeypatch.setenv("PROFILE_ARN", "arn:aws:codewhisperer:us-east-1:123456789:profile/test")
     monkeypatch.setenv("KIRO_REGION", "us-east-1")
+    # Ensure local developer .env does not force multi-account mode during tests
+    monkeypatch.setenv("KIRO_MULTI_CREDS_DIR", "")
+    # Ensure reasoning-related defaults are stable across dev .env
+    monkeypatch.setenv("FAKE_REASONING", "true")
+    monkeypatch.setenv("FAKE_REASONING_MAX_TOKENS", "4000")
+    monkeypatch.setenv("FAKE_REASONING_HANDLING", "as_reasoning_content")
     return {
         "REFRESH_TOKEN": "test_refresh_token_abcdef",
         "PROXY_API_KEY": "test_proxy_key_12345",
         "PROFILE_ARN": "arn:aws:codewhisperer:us-east-1:123456789:profile/test",
-        "KIRO_REGION": "us-east-1"
+        "KIRO_REGION": "us-east-1",
+        "KIRO_MULTI_CREDS_DIR": "",
+        "FAKE_REASONING": "true",
+        "FAKE_REASONING_MAX_TOKENS": "4000",
+        "FAKE_REASONING_HANDLING": "as_reasoning_content",
     }
 
 
@@ -386,10 +401,13 @@ def block_all_network_calls():
 # =============================================================================
 
 @pytest.fixture
-def clean_app():
+def clean_app(tmp_path, monkeypatch):
     """
     Returns a "clean" application instance for each test.
     """
+    # Use an isolated gateway.yml to avoid picking up local developer config
+    monkeypatch.setenv("GATEWAY_YML_PATH", str(tmp_path / "gateway.test.yml"))
+    monkeypatch.setenv("KIRO_MULTI_CREDS_DIR", "")
     print("Importing application for test...")
     from main import app
     # Reset all dependency overrides before test

@@ -166,6 +166,7 @@ class TestParseUsageResponse:
         data = {
             "userInfo": {"email": "paid@test.com"},
             "subscriptionInfo": {"subscriptionTitle": "KIRO PRO"},
+            "overageConfiguration": {"overageEnabled": False},
             "usageBreakdownList": [{
                 "resourceType": "CREDIT",
                 "currentUsageWithPrecision": 25.0,
@@ -178,6 +179,49 @@ class TestParseUsageResponse:
         assert result.trial_active is False
         assert result.total_limit == 1000.0
         assert result.total_used == 25.0
+        assert result.overage_enabled is False
+
+    def test_overage_enabled_bool_true(self):
+        """Parse overageConfiguration.overageEnabled as bool."""
+        data = {
+            "userInfo": {"email": "user@test.com"},
+            "overageConfiguration": {"overageEnabled": True},
+            "usageBreakdownList": [{
+                "resourceType": "CREDIT",
+                "currentUsageWithPrecision": 50.0,
+                "usageLimitWithPrecision": 50.0,
+            }],
+        }
+        result = _parse_usage_response(data)
+        assert result.overage_enabled is True
+
+    def test_overage_enabled_string_true(self):
+        """Parse overageConfiguration.overageEnabled as 'true' string."""
+        data = {
+            "userInfo": {"email": "user@test.com"},
+            "overageConfiguration": {"overageEnabled": "true"},
+            "usageBreakdownList": [{
+                "resourceType": "CREDIT",
+                "currentUsageWithPrecision": 50.0,
+                "usageLimitWithPrecision": 50.0,
+            }],
+        }
+        result = _parse_usage_response(data)
+        assert result.overage_enabled is True
+
+    def test_overage_enabled_string_false(self):
+        """Parse overageConfiguration.overageEnabled as 'false' string."""
+        data = {
+            "userInfo": {"email": "user@test.com"},
+            "overageConfiguration": {"overageEnabled": "false"},
+            "usageBreakdownList": [{
+                "resourceType": "CREDIT",
+                "currentUsageWithPrecision": 50.0,
+                "usageLimitWithPrecision": 50.0,
+            }],
+        }
+        result = _parse_usage_response(data)
+        assert result.overage_enabled is False
 
     def test_response_with_expired_trial(self):
         """Parse response when trial has expired."""

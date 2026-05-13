@@ -106,6 +106,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "profile_arn": None,
         "region": None,
     },
+    "models": {
+        "controls": {},  # {plan_type: {model_id: bool, ...}}
+    },
 }
 
 _FILE_HEADER = (
@@ -311,6 +314,29 @@ class AdminConfig:
             Full configuration as a dict
         """
         return copy.deepcopy(self._config)
+
+    # ------------------------------------------------------------------
+    # Convenience accessors for models section
+    # ------------------------------------------------------------------
+
+    def get_model_controls(self) -> Dict[str, Dict[str, bool]]:
+        """
+        Return the model controls configuration.
+
+        Returns:
+            Dict mapping plan types to model enable/disable states
+            {plan_type: {model_id: bool, ...}}
+        """
+        return copy.deepcopy(self._config.get("models", {}).get("controls", {}))
+
+    def set_model_controls(self, controls: Dict[str, Dict[str, bool]]) -> None:
+        """
+        Set the model controls configuration (in memory only).
+
+        Args:
+            controls: Dict mapping plan types to model enable/disable states
+        """
+        self.set_value("models", "controls", controls)
 
 
 # ------------------------------------------------------------------

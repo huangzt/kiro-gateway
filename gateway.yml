@@ -14,6 +14,14 @@ logging:
   debug_mode: null
   log_history_size: null
   log_level: null
+models:
+  controls:
+    KIRO PRO:
+      claude-haiku-4.5: true
+      claude-opus-4.6: true
+      claude-opus-4.7: true
+      claude-sonnet-4.5: true
+      claude-sonnet-4.6: true
 pool:
   cooldown_seconds: null
   queue_timeout: null

@@ -50,7 +50,7 @@ import time
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
@@ -225,6 +225,7 @@ class AccountPool:
         self._queue: asyncio.Queue[AccountSlot] = asyncio.Queue()
         self._quota_check_interval = quota_check_interval
         self._broadcaster = None  # Will be set by main.py after initialization
+        self._admin_config: Optional[Any] = None  # AdminConfig (set by main.py)
 
         # Status broadcast throttling (Throttle + Trailing)
         self._last_broadcast_time = 0.0
@@ -437,6 +438,132 @@ class AccountPool:
 
             return slot
 
+    def _is_model_enabled_for_slot(self, slot: AccountSlot, model_id: str) -> bool:
+        """
+        Check if a model is enabled for the given account slot.
+
+        Uses model control configuration from admin config.
+
+        Logic:
+        - If no admin config → all models enabled (backward compatible)
+        - If no plan info for slot → all models enabled
+        - If plan type has NO model controls configured → all models enabled
+        - If plan type HAS model controls → only explicitly listed models are enabled
+          (models not in the list are considered disabled for that plan)
+
+        Args:
+            slot: The account slot to check
+            model_id: The model ID to check
+
+        Returns:
+            True if model is enabled for this slot's plan type, False otherwise
+        """
+        if not self._admin_config:
+            return True
+
+        if not slot.quota_info or not slot.quota_info.subscription_plan:
+            return True
+
+        plan_type = slot.quota_info.subscription_plan
+        controls: Dict[str, Dict[str, bool]] = self._admin_config.get_model_controls()
+        plan_controls = controls.get(plan_type, {})
+
+        if not plan_controls:
+            return True
+
+        if model_id in plan_controls:
+            return bool(plan_controls[model_id])
+
+        return False
+
+    async def acquire_for_model(
+        self,
+        model_id: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> AccountSlot:
+        """
+        Acquire an available account slot that supports the specified model.
+
+        If model_id is provided, only returns slots where the model is enabled
+        for that slot's plan type. Falls back to regular acquire if model_id
+        is None or no model controls are configured.
+
+        Args:
+            model_id: The model ID to check against plan-specific controls
+            timeout: Maximum seconds to wait for an available slot
+
+        Returns:
+            An AccountSlot ready for use with the specified model
+
+        Raises:
+            asyncio.TimeoutError: If no suitable slot becomes available
+        """
+        if model_id is None or not self._admin_config:
+            return await self.acquire(timeout)
+
+        deadline = time.monotonic() + timeout
+        skipped_slots: List[AccountSlot] = []
+
+        try:
+            while True:
+                remaining_timeout = deadline - time.monotonic()
+                if remaining_timeout <= 0:
+                    break
+
+                try:
+                    slot = await asyncio.wait_for(
+                        self._queue.get(), timeout=min(remaining_timeout, 1.0)
+                    )
+                    slot._in_queue = False
+                except asyncio.TimeoutError:
+                    if time.monotonic() >= deadline:
+                        break
+                    continue
+
+                if self._is_model_enabled_for_slot(slot, model_id):
+                    for skipped in skipped_slots:
+                        if not skipped._in_queue and not skipped.is_exhausted and not skipped.is_disabled:
+                            skipped._in_queue = True
+                            await self._queue.put(skipped)
+                    skipped_slots.clear()
+
+                    if self._quota_check_interval > 0:
+                        await self._maybe_refresh_quota(slot)
+
+                    if slot.is_exhausted or slot.is_disabled:
+                        continue
+
+                    slot.active_requests += 1
+                    slot.total_requests += 1
+
+                    email_str = f" ({slot.email})" if slot.email else ""
+                    quota_str = f", quota: {slot.quota_summary}" if slot.quota_info else ""
+                    plan_str = f", plan: {slot.quota_info.subscription_plan}" if slot.quota_info else ""
+
+                    logger.info(
+                        f"Account acquired for model '{model_id}': {slot.name}{email_str} "
+                        f"(active={slot.active_requests}, total={slot.total_requests}{quota_str}{plan_str})"
+                    )
+
+                    await self._broadcast_status_update()
+                    return slot
+
+                plan_type = slot.quota_info.subscription_plan if slot.quota_info else "unknown"
+                logger.debug(
+                    f"Skipping slot '{slot.name}' for model '{model_id}': "
+                    f"model disabled for plan '{plan_type}'"
+                )
+                skipped_slots.append(slot)
+        finally:
+            for skipped in skipped_slots:
+                if not skipped._in_queue and not skipped.is_exhausted and not skipped.is_disabled:
+                    skipped._in_queue = True
+                    await self._queue.put(skipped)
+
+        raise asyncio.TimeoutError(
+            f"No available account supports model '{model_id}' within timeout"
+        )
+
     async def _maybe_refresh_quota(self, slot: AccountSlot) -> None:
         """
         Refresh quota info for a slot if the cached info is stale.
@@ -472,7 +599,7 @@ class AccountPool:
             quota = await check_quota(access_token, provider)
             slot.quota_info = quota
 
-            if quota.is_exhausted:
+            if quota.is_exhausted and not getattr(quota, "overage_enabled", False):
                 slot.is_exhausted = True
                 logger.error(
                     f"Account '{slot.name}' ({quota.email}) is EXHAUSTED "
@@ -481,6 +608,13 @@ class AccountPool:
                 )
                 # Broadcast status update when account becomes exhausted
                 await self._broadcast_status_update()
+            elif quota.is_exhausted and getattr(quota, "overage_enabled", False):
+                slot.is_exhausted = False
+                logger.info(
+                    f"Account '{slot.name}' ({quota.email}) has overage enabled, "
+                    f"ignoring exhausted quota (quota: {quota.usage_summary}). "
+                    f"Plan: {quota.subscription_plan}"
+                )
             else:
                 logger.info(
                     f"Quota check: {slot.name} ({quota.email}) "
@@ -669,6 +803,7 @@ class AccountPool:
                     "plan": slot.quota_info.subscription_plan,
                     "next_reset": slot.quota_info.next_reset,
                     "trial_expiry": slot.quota_info.trial_expiry,
+                    "overage_enabled": getattr(slot.quota_info, "overage_enabled", False),
                     "last_checked_age_seconds": round(slot.quota_info.age_seconds()),
                 }
             if is_cooling:

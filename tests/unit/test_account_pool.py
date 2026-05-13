@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from kiro.account_pool import AccountSlot, AccountPool
 from kiro.auth import KiroAuthManager
+from kiro.quota_checker import QuotaInfo
 
 
 # =============================================================================
@@ -579,6 +580,55 @@ class TestPoolStatus:
         status = single_pool.get_status()
         assert status["accounts"][0]["total_requests"] == 5
         assert status["accounts"][0]["active_requests"] == 0
+
+
+# =============================================================================
+# Model control tests
+# =============================================================================
+
+
+class _FakeAdminConfig:
+    def __init__(self, controls):
+        self._controls = controls
+
+    def get_model_controls(self):
+        return self._controls
+
+
+class TestModelControls:
+    def test_is_model_enabled_no_admin_config_allows(self, single_pool, single_slot):
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m1") is True
+
+    def test_is_model_enabled_no_quota_info_allows(self, single_pool, single_slot):
+        single_pool._admin_config = _FakeAdminConfig({"KIRO FREE": {"m1": True}})
+        single_slot.quota_info = None
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m1") is True
+
+    def test_is_model_enabled_plan_without_controls_allows(self, single_pool, single_slot):
+        single_pool._admin_config = _FakeAdminConfig({})
+        single_slot.quota_info = QuotaInfo(subscription_plan="KIRO FREE")
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m1") is True
+
+    def test_is_model_enabled_plan_with_controls_only_allows_listed_true(self, single_pool, single_slot):
+        single_pool._admin_config = _FakeAdminConfig({"KIRO FREE": {"m1": True, "m2": False}})
+        single_slot.quota_info = QuotaInfo(subscription_plan="KIRO FREE")
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m1") is True
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m2") is False
+        assert single_pool._is_model_enabled_for_slot(single_slot, "m3") is False
+
+    @pytest.mark.asyncio
+    async def test_acquire_for_model_skips_disabled_model_slots(self, mock_auth_manager_factory):
+        slot_free = AccountSlot(name="account-0", auth_manager=mock_auth_manager_factory("0"))
+        slot_pro = AccountSlot(name="account-1", auth_manager=mock_auth_manager_factory("1"))
+        slot_free.quota_info = QuotaInfo(subscription_plan="KIRO FREE")
+        slot_pro.quota_info = QuotaInfo(subscription_plan="KIRO PRO")
+
+        pool = AccountPool([slot_free, slot_pro], quota_check_interval=0.0)
+        pool._admin_config = _FakeAdminConfig({"KIRO FREE": {"m1": True}, "KIRO PRO": {"m1": False}})
+
+        got = await pool.acquire_for_model(model_id="m1", timeout=1.0)
+        assert got.name == "account-0"
+        await pool.release(got)
 
 
 # =============================================================================
