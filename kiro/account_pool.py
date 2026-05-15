@@ -787,7 +787,7 @@ class AccountPool:
         """
         try:
             access_token = await slot.auth_manager.get_access_token()
-            provider = getattr(slot.auth_manager, '_provider', 'BuilderId')
+            provider = slot.auth_manager.provider
             quota = await check_quota(access_token, provider, proxy_url=slot.proxy_url)
             slot.quota_info = quota
 

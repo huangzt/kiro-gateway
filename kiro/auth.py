@@ -157,6 +157,10 @@ class KiroAuthManager:
         
         # Track which SQLite key we loaded credentials from (for saving back to correct location)
         self._sqlite_token_key: Optional[str] = None
+
+        # IdP name for Kiro Web Portal (quota) Cookie: Idp={provider}; AccessToken=...
+        # Kiro IDE social JSON uses "Github" / "Google" / etc.; default matches personal BuilderId.
+        self._provider: str = "BuilderId"
         
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
@@ -281,6 +285,10 @@ class KiroAuthManager:
                     # Load scopes if available
                     if 'scopes' in token_data:
                         self._scopes = token_data['scopes']
+
+                    prov = token_data.get('provider')
+                    if isinstance(prov, str) and prov.strip():
+                        self._provider = prov.strip()
                     
                     # Parse expires_at (RFC3339 format)
                     if 'expires_at' in token_data:
@@ -339,6 +347,10 @@ class KiroAuthManager:
         Additional fields for AWS SSO OIDC (kiro-cli):
         - clientId: OAuth client ID
         - clientSecret: OAuth client secret
+
+        Social / third-party sign-in (Kiro IDE ``kiro-auth-token.json``):
+        - provider: IdP label for portal quota API (e.g. ``Github``, ``Google``)
+        - authMethod: e.g. ``social`` (informational; quota uses ``provider``)
         
         For Enterprise Kiro IDE:
         - clientIdHash: Hash of client ID (Enterprise Kiro IDE)
@@ -383,6 +395,9 @@ class KiroAuthManager:
                 self._client_id = data['clientId']
             if 'clientSecret' in data:
                 self._client_secret = data['clientSecret']
+
+            if 'provider' in data and isinstance(data['provider'], str) and data['provider'].strip():
+                self._provider = data['provider'].strip()
             
             # Parse expiresAt
             if 'expiresAt' in data:
@@ -913,3 +928,8 @@ class KiroAuthManager:
     def auth_type(self) -> AuthType:
         """Authentication type (KIRO_DESKTOP or AWS_SSO_OIDC)."""
         return self._auth_type
+
+    @property
+    def provider(self) -> str:
+        """IdP name for Kiro Web Portal quota checks (e.g. ``BuilderId``, ``Github``, ``IAM_Identity_Center``)."""
+        return self._provider

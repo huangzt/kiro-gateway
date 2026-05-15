@@ -1638,7 +1638,7 @@ async def _fetch_email_for_duplicate_check(
         from kiro.quota_checker import check_quota
 
         access_token = await auth_manager.get_access_token()
-        provider = getattr(auth_manager, "_provider", "BuilderId")
+        provider = auth_manager.provider
         quota = await check_quota(access_token, provider)
         return quota.email or None
     except Exception as exc:

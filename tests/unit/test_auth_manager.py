@@ -104,6 +104,27 @@ class TestKiroAuthManagerCredentialsFile:
         print("Verification: expiresAt parsed correctly...")
         assert manager._expires_at is not None
         assert manager._expires_at.year == 2099
+
+        print("Verification: default portal IdP when JSON omits provider...")
+        assert manager.provider == "BuilderId"
+
+    def test_load_credentials_from_file_social_github_sets_provider(self, tmp_path):
+        """
+        What it does: Loads Kiro IDE social JSON with provider field.
+        Purpose: Portal quota API requires Cookie Idp to match sign-in (e.g. Github).
+        """
+        creds_file = tmp_path / "kiro-auth-token.json"
+        creds_data = {
+            "accessToken": "social_access",
+            "refreshToken": "social_refresh",
+            "expiresAt": "2099-01-01T00:00:00.000Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789:profile/test",
+            "authMethod": "social",
+            "provider": "Github",
+        }
+        creds_file.write_text(json.dumps(creds_data))
+        manager = KiroAuthManager(creds_file=str(creds_file))
+        assert manager.provider == "Github"
     
     def test_load_credentials_file_not_found(self, tmp_path):
         """
