@@ -52,6 +52,7 @@ from pydantic import BaseModel
 from kiro.config import PROXY_API_KEY, KIRO_MULTI_CREDS_DIR, PROFILE_ARN, REGION
 from kiro.account_pool import AccountPool, AccountSlot
 from kiro.admin_config import AdminConfig
+from kiro.account_proxy import load_proxy_url_from_account_dir, mask_proxy_url, normalize_proxy_url, save_proxy_url_to_account_dir
 from kiro.log_broadcaster import LogBroadcaster
 
 
@@ -250,12 +251,14 @@ async def add_account(
     # Create KiroAuthManager and AccountSlot
     from kiro.auth import KiroAuthManager
 
+    proxy_u = load_proxy_url_from_account_dir(new_dir)
     auth_manager = KiroAuthManager(
         profile_arn=PROFILE_ARN if PROFILE_ARN else None,
         region=REGION,
         creds_file=str(new_dir / "kiro-auth-token.json"),
         client_id=client_id_override,
         client_secret=client_secret_override,
+        http_proxy_url=proxy_u,
     )
 
     pool: AccountPool = request.app.state.account_pool
@@ -272,7 +275,7 @@ async def add_account(
                 ),
             )
 
-    slot = AccountSlot(name=new_name, auth_manager=auth_manager)
+    slot = AccountSlot(name=new_name, auth_manager=auth_manager, proxy_url=proxy_u)
 
     # Add to pool
     await pool.add_slot(slot)
@@ -305,6 +308,12 @@ class BatchExportAccountsRequest(BaseModel):
 
     account_names: List[str]
     delete_exported_accounts: bool = False
+
+
+class AccountProxyUpdateRequest(BaseModel):
+    """Request body for PATCH /admin/accounts/{name}/proxy."""
+
+    proxy_url: Optional[str] = None
 
 
 class ImportedAccountResult(BaseModel):
@@ -391,12 +400,14 @@ async def import_host_cache_account(
 
         from kiro.auth import KiroAuthManager
 
+        proxy_u = load_proxy_url_from_account_dir(new_dir)
         auth_manager = KiroAuthManager(
             profile_arn=PROFILE_ARN if PROFILE_ARN else None,
             region=REGION,
             creds_file=str(target_auth_path),
             client_id=client_id_override,
             client_secret=client_secret_override,
+            http_proxy_url=proxy_u,
         )
 
         pool: AccountPool = request.app.state.account_pool
@@ -412,7 +423,7 @@ async def import_host_cache_account(
                     ),
                 )
 
-        slot = AccountSlot(name=new_name, auth_manager=auth_manager)
+        slot = AccountSlot(name=new_name, auth_manager=auth_manager, proxy_url=proxy_u)
         await pool.add_slot(slot)
 
         try:
@@ -635,12 +646,14 @@ async def import_accounts_zip(
 
             from kiro.auth import KiroAuthManager
 
+            proxy_u = load_proxy_url_from_account_dir(new_dir)
             auth_manager = KiroAuthManager(
                 profile_arn=PROFILE_ARN if PROFILE_ARN else None,
                 region=REGION,
                 creds_file=str(target_auth),
                 client_id=client_id_override,
                 client_secret=client_secret_override,
+                http_proxy_url=proxy_u,
             )
 
             new_email = await _fetch_email_for_duplicate_check(auth_manager)
@@ -657,7 +670,7 @@ async def import_accounts_zip(
                     shutil.rmtree(new_dir, ignore_errors=True)
                     continue
 
-            slot = AccountSlot(name=new_name, auth_manager=auth_manager)
+            slot = AccountSlot(name=new_name, auth_manager=auth_manager, proxy_url=proxy_u)
             await pool.add_slot(slot)
             try:
                 await pool._check_slot_quota(slot)
@@ -729,6 +742,53 @@ async def refresh_quota(account_name: str, request: Request) -> JSONResponse:
             "account_name": account_name,
             "quota": quota,
             "is_exhausted": slot.is_exhausted,
+        }
+    )
+
+
+@router.patch(
+    "/accounts/{account_name}/proxy",
+    dependencies=[Depends(verify_admin_key)],
+)
+async def update_account_proxy(
+    account_name: str,
+    body: AccountProxyUpdateRequest,
+    request: Request,
+) -> JSONResponse:
+    """
+    Set or clear per-account outbound HTTP proxy (persisted to account-config.json).
+
+    Same URL format as VPN_PROXY_URL (http, https, socks5). Empty string clears.
+    """
+    pool: AccountPool = request.app.state.account_pool
+    slot = pool.get_slot_by_name(account_name)
+    if slot is None:
+        raise HTTPException(status_code=404, detail=f"Account '{account_name}' not found")
+
+    creds_dir = slot.auth_manager.creds_dir
+    if creds_dir is None or not creds_dir.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail="Account has no credentials directory on disk; cannot store proxy.",
+        )
+
+    raw = body.proxy_url
+    if raw is None:
+        new_proxy: Optional[str] = None
+    else:
+        stripped = raw.strip()
+        new_proxy = normalize_proxy_url(stripped) if stripped else None
+
+    save_proxy_url_to_account_dir(creds_dir, new_proxy)
+    slot.proxy_url = new_proxy
+    slot.auth_manager.set_http_proxy_url(new_proxy)
+    logger.info(f"Updated outbound proxy for account '{account_name}' (enabled={bool(new_proxy)})")
+
+    return JSONResponse(
+        content={
+            "success": True,
+            "account_name": account_name,
+            "proxy_url": mask_proxy_url(new_proxy),
         }
     )
 
@@ -823,15 +883,17 @@ async def refresh_all_quotas(request: Request) -> JSONResponse:
                                 logger.warning(f"Failed to load device registration for '{account_name}': {e}")
 
                     # Create auth manager and slot
+                    proxy_u = load_proxy_url_from_account_dir(subdir)
                     auth_manager = KiroAuthManager(
                         profile_arn=PROFILE_ARN if PROFILE_ARN else None,
                         region=REGION,
                         creds_file=str(creds_file),
                         client_id=client_id_override,
                         client_secret=client_secret_override,
+                        http_proxy_url=proxy_u,
                     )
 
-                    slot = AccountSlot(name=account_name, auth_manager=auth_manager)
+                    slot = AccountSlot(name=account_name, auth_manager=auth_manager, proxy_url=proxy_u)
 
                     # Add to pool
                     await pool.add_slot(slot)

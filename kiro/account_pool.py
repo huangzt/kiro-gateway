@@ -48,6 +48,7 @@ import asyncio
 import json
 import time
 import shutil
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,7 +57,8 @@ from loguru import logger
 
 from kiro.auth import KiroAuthManager
 from kiro.quota_checker import QuotaInfo, check_quota, QuotaCheckError
-from kiro.config import KIRO_HOST_CACHE_DIR
+from kiro.config import KIRO_HOST_CACHE_DIR, SESSION_STICKY_MAX_ENTRIES, SESSION_STICKY_TTL_SECONDS
+from kiro.account_proxy import load_proxy_url_from_account_dir, mask_proxy_url
 
 
 def _account_name_sort_key(name: str) -> tuple[int, str]:
@@ -93,10 +95,12 @@ class AccountSlot:
         is_exhausted: Whether this account's quota is used up
         is_disabled: Whether this account has been manually disabled via Admin UI
         quota_info: Latest quota info from Kiro Web Portal API
+        proxy_url: Optional per-account outbound proxy (same semantics as VPN_PROXY_URL).
     """
 
     name: str
     auth_manager: KiroAuthManager
+    proxy_url: Optional[str] = None
     semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     active_requests: int = 0
     total_requests: int = 0
@@ -222,7 +226,11 @@ class AccountPool:
                                   Default is 300 (5 minutes). Set to 0 to disable.
         """
         self._slots = slots
-        self._queue: asyncio.Queue[AccountSlot] = asyncio.Queue()
+        self._idle: deque[AccountSlot] = deque()
+        self._idle_cv = asyncio.Condition()
+        self._session_bindings: OrderedDict[str, str] = OrderedDict()
+        self._session_binding_mono: Dict[str, float] = {}
+        self._session_bindings_lock = asyncio.Lock()
         self._quota_check_interval = quota_check_interval
         self._broadcaster = None  # Will be set by main.py after initialization
         self._admin_config: Optional[Any] = None  # AdminConfig (set by main.py)
@@ -232,11 +240,11 @@ class AccountPool:
         self._pending_broadcast = False
         self._broadcast_timer: Optional[asyncio.Task] = None
 
-        # Pre-populate queue with all available slots
+        # Pre-populate idle deque with all available slots
         for slot in self._slots:
             if not slot.is_exhausted and not slot.is_disabled:
                 slot._in_queue = True
-                self._queue.put_nowait(slot)
+                self._idle.append(slot)
 
         if not slots:
             logger.warning(
@@ -277,6 +285,198 @@ class AccountPool:
         """Number of accounts that have reached their quota."""
         return sum(1 for slot in self._slots if slot.is_exhausted)
 
+    def _idle_waiting_count(self) -> int:
+        """Number of idle account slots waiting in the fair deque."""
+        return len(self._idle)
+
+    async def _idle_wait_popleft(self, wait_seconds: float) -> AccountSlot:
+        """
+        Pop the leftmost idle slot, waiting up to ``wait_seconds`` for one to appear.
+
+        Raises:
+            asyncio.TimeoutError: If no slot becomes available in time.
+        """
+        async with self._idle_cv:
+            deadline = time.monotonic() + max(0.0, wait_seconds)
+            while True:
+                if self._idle:
+                    slot = self._idle.popleft()
+                    slot._in_queue = False
+                    return slot
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    await asyncio.wait_for(self._idle_cv.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    if time.monotonic() >= deadline:
+                        raise asyncio.TimeoutError
+
+    async def _idle_offer(self, slot: AccountSlot) -> None:
+        """Append a slot to the idle deque (FIFO tail) if it may accept work."""
+        async with self._idle_cv:
+            if slot._in_queue:
+                return
+            if slot.is_disabled or slot.is_exhausted:
+                return
+            slot._in_queue = True
+            self._idle.append(slot)
+            self._idle_cv.notify_all()
+
+    async def _idle_remove_slot_if_present(self, slot: AccountSlot) -> None:
+        """Remove a slot from the idle deque if present (e.g. pool removal)."""
+        async with self._idle_cv:
+            try:
+                self._idle.remove(slot)
+            except ValueError:
+                return
+            slot._in_queue = False
+            self._idle_cv.notify_all()
+
+    def _session_prune_stale(self) -> None:
+        """Drop session bindings older than SESSION_STICKY_TTL_SECONDS."""
+        now = time.monotonic()
+        cutoff = now - float(SESSION_STICKY_TTL_SECONDS)
+        stale = [k for k, t in self._session_binding_mono.items() if t < cutoff]
+        for k in stale:
+            self._session_bindings.pop(k, None)
+            self._session_binding_mono.pop(k, None)
+
+    def _session_touch(self, session_key: str, account_name: str) -> None:
+        """Record or refresh a session-to-account binding (LRU capped)."""
+        self._session_bindings[session_key] = account_name
+        self._session_bindings.move_to_end(session_key)
+        self._session_binding_mono[session_key] = time.monotonic()
+        while len(self._session_bindings) > int(SESSION_STICKY_MAX_ENTRIES):
+            old_k, _ = self._session_bindings.popitem(last=False)
+            self._session_binding_mono.pop(old_k, None)
+
+    async def acquire_for_session(
+        self,
+        session_key: Optional[str],
+        model_id: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> AccountSlot:
+        """
+        Acquire a slot, optionally pinning follow-up requests to one account.
+
+        When ``session_key`` is non-empty and a binding exists or is created,
+        subsequent calls with the same key reuse the same account when possible.
+
+        Args:
+            session_key: Client-supplied stable id (e.g. from ``X-Kiro-Session-Id``).
+            model_id: Optional model id for plan-based filtering.
+            timeout: Max seconds to wait for a suitable slot.
+
+        Returns:
+            An AccountSlot ready for use.
+
+        Raises:
+            asyncio.TimeoutError: If no slot becomes available (same as acquire_for_model).
+        """
+        sk = (session_key or "").strip()
+        if not sk:
+            return await self.acquire_for_model(model_id=model_id, timeout=timeout)
+
+        async with self._session_bindings_lock:
+            self._session_prune_stale()
+            bound = self._session_bindings.get(sk)
+
+        if bound:
+            try:
+                slot = await self._acquire_slot_by_name_for_model(
+                    bound, model_id=model_id, timeout=timeout
+                )
+                async with self._session_bindings_lock:
+                    self._session_touch(sk, slot.name)
+                return slot
+            except asyncio.TimeoutError:
+                async with self._session_bindings_lock:
+                    self._session_bindings.pop(sk, None)
+                    self._session_binding_mono.pop(sk, None)
+                sk_short = sk if len(sk) <= 24 else sk[:21] + "..."
+                logger.info(
+                    f"Session '{sk_short}' binding to account '{bound}' cleared; "
+                    "selecting a new account."
+                )
+
+        slot = await self.acquire_for_model(model_id=model_id, timeout=timeout)
+        async with self._session_bindings_lock:
+            self._session_touch(sk, slot.name)
+        return slot
+
+    async def _acquire_slot_by_name_for_model(
+        self,
+        account_name: str,
+        model_id: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> AccountSlot:
+        """
+        Wait until the named account slot is idle and acquire it for ``model_id``.
+
+        Raises:
+            asyncio.TimeoutError: If the account never becomes available or cannot serve the model.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(
+                    f"Account '{account_name}' did not become available within timeout"
+                )
+            slot_ref = self.get_slot_by_name(account_name)
+            if slot_ref is None or slot_ref.is_disabled or slot_ref.is_exhausted:
+                raise asyncio.TimeoutError(f"Account '{account_name}' is no longer available")
+            if model_id and self._admin_config and not self._is_model_enabled_for_slot(slot_ref, model_id):
+                raise asyncio.TimeoutError(
+                    f"Model '{model_id}' is not enabled for account '{account_name}'"
+                )
+
+            slot: Optional[AccountSlot] = None
+            async with self._idle_cv:
+                idx: Optional[int] = None
+                for i, s in enumerate(self._idle):
+                    if s.name == account_name:
+                        idx = i
+                        break
+                if idx is not None:
+                    slot = self._idle[idx]
+                    del self._idle[idx]
+                    slot._in_queue = False
+                    self._idle_cv.notify_all()
+                else:
+                    try:
+                        await asyncio.wait_for(self._idle_cv.wait(), timeout=min(remaining, 1.0))
+                    except asyncio.TimeoutError:
+                        pass
+
+            if slot is None:
+                continue
+
+            if self._quota_check_interval > 0:
+                await self._maybe_refresh_quota(slot)
+
+            if slot.is_exhausted or slot.is_disabled:
+                raise asyncio.TimeoutError(f"Account '{account_name}' became unavailable during acquire")
+
+            if model_id and self._admin_config and not self._is_model_enabled_for_slot(slot, model_id):
+                raise asyncio.TimeoutError(
+                    f"Model '{model_id}' is not enabled for account '{account_name}' after quota refresh"
+                )
+
+            slot.active_requests += 1
+            slot.total_requests += 1
+            email_str = f" ({slot.email})" if slot.email else ""
+            quota_str = f", quota: {slot.quota_summary}" if slot.quota_info else ""
+            plan_str = f", plan: {slot.quota_info.subscription_plan}" if slot.quota_info else ""
+            model_part = repr(model_id) if model_id is not None else "(no filter)"
+            logger.info(
+                f"Account acquired (session-bound) for model {model_part}: {slot.name}{email_str} "
+                f"(active={slot.active_requests}, total={slot.total_requests}{quota_str}{plan_str})"
+            )
+            await self._broadcast_status_update()
+            return slot
+
     async def acquire(self, timeout: float = 300.0) -> AccountSlot:
         """
         Acquire an available account slot from the pool.
@@ -300,7 +500,7 @@ class AccountPool:
         logger.debug(
             f"Acquiring account slot... "
             f"(available={self.available_count}, busy={self.busy_count}, "
-            f"queue_waiting={self._queue.qsize()})"
+            f"queue_waiting={self._idle_waiting_count()})"
         )
 
         deadline = time.monotonic() + timeout
@@ -344,10 +544,7 @@ class AccountPool:
                     raise asyncio.TimeoutError("All accounts busy. Service overloaded.")
 
             try:
-                slot = await asyncio.wait_for(
-                    self._queue.get(), timeout=remaining_timeout
-                )
-                slot._in_queue = False
+                slot = await self._idle_wait_popleft(remaining_timeout)
             except asyncio.TimeoutError:
                 # Timeout during queue.get() - analyze why and provide specific error message
                 if self.size == 0:
@@ -511,10 +708,7 @@ class AccountPool:
                     break
 
                 try:
-                    slot = await asyncio.wait_for(
-                        self._queue.get(), timeout=min(remaining_timeout, 1.0)
-                    )
-                    slot._in_queue = False
+                    slot = await self._idle_wait_popleft(min(remaining_timeout, 1.0))
                 except asyncio.TimeoutError:
                     if time.monotonic() >= deadline:
                         break
@@ -523,8 +717,7 @@ class AccountPool:
                 if self._is_model_enabled_for_slot(slot, model_id):
                     for skipped in skipped_slots:
                         if not skipped._in_queue and not skipped.is_exhausted and not skipped.is_disabled:
-                            skipped._in_queue = True
-                            await self._queue.put(skipped)
+                            await self._idle_offer(skipped)
                     skipped_slots.clear()
 
                     if self._quota_check_interval > 0:
@@ -557,8 +750,7 @@ class AccountPool:
         finally:
             for skipped in skipped_slots:
                 if not skipped._in_queue and not skipped.is_exhausted and not skipped.is_disabled:
-                    skipped._in_queue = True
-                    await self._queue.put(skipped)
+                    await self._idle_offer(skipped)
 
         raise asyncio.TimeoutError(
             f"No available account supports model '{model_id}' within timeout"
@@ -596,7 +788,7 @@ class AccountPool:
         try:
             access_token = await slot.auth_manager.get_access_token()
             provider = getattr(slot.auth_manager, '_provider', 'BuilderId')
-            quota = await check_quota(access_token, provider)
+            quota = await check_quota(access_token, provider, proxy_url=slot.proxy_url)
             slot.quota_info = quota
 
             if quota.is_exhausted and not getattr(quota, "overage_enabled", False):
@@ -693,6 +885,11 @@ class AccountPool:
         if exhausted:
             # Account is out of quota - disable it
             slot.is_exhausted = True
+            async with self._session_bindings_lock:
+                stale_keys = [k for k, v in self._session_bindings.items() if v == slot.name]
+                for k in stale_keys:
+                    self._session_bindings.pop(k, None)
+                    self._session_binding_mono.pop(k, None)
             logger.error(
                 f"Account '{slot.name}' is EXHAUSTED (quota reached). "
                 f"It has been removed from the active pool."
@@ -716,8 +913,7 @@ class AccountPool:
                 logger.info(f"Account '{slot.name}' was disabled/exhausted while busy, not returning to pool")
                 return
 
-            slot._in_queue = True
-            await self._queue.put(slot)
+            await self._idle_offer(slot)
             logger.info(
                 f"Account released: {slot.name} "
                 f"(available={self.available_count})"
@@ -742,8 +938,7 @@ class AccountPool:
                 logger.info(f"Account '{slot.name}' was disabled/exhausted while cooling, not returning to pool")
                 return
 
-            slot._in_queue = True
-            await self._queue.put(slot)
+            await self._idle_offer(slot)
             logger.info(
                 f"Account '{slot.name}' cooldown expired, back in pool "
                 f"(available={self.available_count})"
@@ -754,8 +949,7 @@ class AccountPool:
             # If task is cancelled (e.g., server shutdown), put slot back immediately
             slot.cooldown_until = 0.0
             if not slot.is_disabled and not slot.is_exhausted:
-                slot._in_queue = True
-                await self._queue.put(slot)
+                await self._idle_offer(slot)
             logger.debug(f"Cooldown cancelled for '{slot.name}', slot returned to pool")
 
     def get_status(self) -> dict:
@@ -793,6 +987,7 @@ class AccountPool:
                 "is_exhausted": slot.is_exhausted,
                 "is_disabled": slot.is_disabled,
                 "is_active_on_host": slot.is_active_on_host,
+                "proxy_url": mask_proxy_url(slot.proxy_url),
             }
             # Quota details
             if slot.quota_info:
@@ -950,8 +1145,7 @@ class AccountPool:
 
         self._slots.append(slot)
         if not slot.is_exhausted and not slot.is_disabled and not slot._in_queue:
-            slot._in_queue = True
-            await self._queue.put(slot)
+            await self._idle_offer(slot)
         logger.info(
             f"Account slot added: '{slot.name}' "
             f"(pool size: {self.size}, available: {self.available_count})"
@@ -966,7 +1160,7 @@ class AccountPool:
         The slot is marked as exhausted so the queue will naturally
         skip it on next dequeue. The slot is removed from self._slots.
 
-        Safe to call while the slot may be in the asyncio.Queue —
+        Safe to call while the slot may be listed in the idle deque —
         marking is_exhausted ensures the acquire() loop skips it.
 
         Args:
@@ -986,6 +1180,14 @@ class AccountPool:
                 f"{slot.active_requests} active request(s) in progress"
             )
             return False
+
+        await self._idle_remove_slot_if_present(slot)
+
+        async with self._session_bindings_lock:
+            stale_keys = [k for k, v in self._session_bindings.items() if v == name]
+            for k in stale_keys:
+                self._session_bindings.pop(k, None)
+                self._session_binding_mono.pop(k, None)
 
         # Mark exhausted so acquire() skips it when it comes off the queue
         slot.is_exhausted = True
@@ -1075,6 +1277,12 @@ class AccountPool:
             return False
 
         slot.is_disabled = True
+        async with self._session_bindings_lock:
+            stale_keys = [k for k, v in self._session_bindings.items() if v == name]
+            for k in stale_keys:
+                self._session_bindings.pop(k, None)
+                self._session_binding_mono.pop(k, None)
+        await self._idle_remove_slot_if_present(slot)
         logger.info(f"Account slot disabled: '{name}'")
         # Broadcast status update after disabling slot
         await self._broadcast_status_update()
@@ -1104,8 +1312,7 @@ class AccountPool:
         slot.is_disabled = False
         # Only re-queue if not also exhausted or actively cooling or already in queue
         if not slot.is_exhausted and not slot.is_cooling_down and not slot._in_queue:
-            slot._in_queue = True
-            await self._queue.put(slot)
+            await self._idle_offer(slot)
         logger.info(
             f"Account slot enabled: '{name}' "
             f"(available: {self.available_count})"
@@ -1138,8 +1345,7 @@ class AccountPool:
 
         slot.cooldown_until = 0.0
         if not slot.is_exhausted and not slot.is_disabled and not slot._in_queue:
-            slot._in_queue = True
-            await self._queue.put(slot)
+            await self._idle_offer(slot)
         logger.info(
             f"Cooldown cleared for '{name}' — slot immediately available "
             f"(available: {self.available_count})"
@@ -1297,6 +1503,7 @@ class AccountPool:
                         f"device registration file not found: {device_reg_file.name}"
                     )
 
+            proxy_u = load_proxy_url_from_account_dir(subdir)
             # Create KiroAuthManager for this account
             # We pass the creds_file path so it loads refreshToken, accessToken, etc.
             auth_manager = KiroAuthManager(
@@ -1305,9 +1512,10 @@ class AccountPool:
                 creds_file=str(creds_file),
                 client_id=client_id_override,
                 client_secret=client_secret_override,
+                http_proxy_url=proxy_u,
             )
 
-            slot = AccountSlot(name=account_name, auth_manager=auth_manager)
+            slot = AccountSlot(name=account_name, auth_manager=auth_manager, proxy_url=proxy_u)
             slots.append(slot)
             logger.info(
                 f"Account loaded: {account_name} "

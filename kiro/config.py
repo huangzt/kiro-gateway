@@ -226,6 +226,23 @@ COOLDOWN_SECONDS: float = float(os.getenv("COOLDOWN_SECONDS", "300"))
 # Default: 300 seconds (5 minutes)
 QUOTA_CHECK_INTERVAL: float = float(os.getenv("QUOTA_CHECK_INTERVAL", "300"))
 
+# Session stickiness: clients send ``X-Kiro-Session-Id`` so multi-turn chats reuse one account.
+# TTL resets on each successful request; entries beyond max count are evicted (LRU).
+SESSION_STICKY_TTL_SECONDS: float = float(os.getenv("SESSION_STICKY_TTL_SECONDS", "86400"))
+SESSION_STICKY_MAX_ENTRIES: int = int(os.getenv("SESSION_STICKY_MAX_ENTRIES", "10000"))
+KIRO_SESSION_HEADER: str = os.getenv("KIRO_SESSION_HEADER", "X-Kiro-Session-Id")
+# Fallback for sticky sessions when the primary header is absent (Claude Code CLI sends this).
+CLAUDE_CODE_SESSION_HEADER: str = os.getenv("CLAUDE_CODE_SESSION_HEADER", "X-Claude-Code-Session-Id")
+# When true, after explicit session headers, scan other request headers whose names look
+# session-related and whose values parse as UUIDs (conservative; avoids request-id churn).
+SESSION_STICKY_DISCOVER_HEADERS: bool = os.getenv(
+    "SESSION_STICKY_DISCOVER_HEADERS", "true"
+).lower() in ("1", "true", "yes")
+
+# When true, log all incoming HTTP headers (values redacted for secrets) at INFO for
+# POST /v1/chat/completions and POST /v1/messages — useful to inspect clients (e.g. Claude Code).
+LOG_CLIENT_HEADERS: bool = os.getenv("LOG_CLIENT_HEADERS", "false").lower() in ("1", "true", "yes")
+
 # ==================================================================================================
 # Kiro API Credentials
 # ==================================================================================================

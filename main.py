@@ -454,14 +454,26 @@ async def lifespan(app: FastAPI):
     else:
         # Single-account mode: create pool with one account
         # Priority: SQLite DB > JSON file > environment variables
+        single_proxy = None
+        if eff_creds:
+            from pathlib import Path
+            from kiro.account_proxy import load_proxy_url_from_account_dir
+
+            cred_path = Path(eff_creds).expanduser()
+            if cred_path.is_file():
+                single_proxy = load_proxy_url_from_account_dir(cred_path.resolve().parent)
+
         auth_manager = KiroAuthManager(
             refresh_token=eff_rt,
             profile_arn=eff_profile,
             region=eff_region,
             creds_file=eff_creds if eff_creds else None,
             sqlite_db=eff_db if eff_db else None,
+            http_proxy_url=single_proxy,
         )
         account_pool = AccountPool.from_single(auth_manager)
+        if single_proxy and account_pool.size > 0:
+            account_pool.slots[0].proxy_url = single_proxy
     
     app.state.account_pool = account_pool
 

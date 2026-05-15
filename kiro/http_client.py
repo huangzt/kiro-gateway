@@ -41,6 +41,7 @@ from kiro.config import MAX_RETRIES, BASE_RETRY_DELAY, FIRST_TOKEN_MAX_RETRIES, 
 from kiro.auth import KiroAuthManager
 from kiro.utils import get_kiro_headers
 from kiro.network_errors import classify_network_error, get_short_error_message, NetworkErrorInfo
+from kiro.account_proxy import httpx_client_kwargs_for_proxy
 
 
 class KiroHttpClient:
@@ -78,7 +79,8 @@ class KiroHttpClient:
     def __init__(
         self,
         auth_manager: KiroAuthManager,
-        shared_client: Optional[httpx.AsyncClient] = None
+        shared_client: Optional[httpx.AsyncClient] = None,
+        proxy_url: Optional[str] = None,
     ):
         """
         Initializes the HTTP client.
@@ -88,11 +90,15 @@ class KiroHttpClient:
             shared_client: Optional shared httpx.AsyncClient for connection pooling.
                           If provided, this client will be used instead of creating
                           a new one. The shared client will NOT be closed by close().
+            proxy_url: If set, always uses a dedicated httpx client with this proxy
+                       (shared_client is ignored for correct per-account routing).
         """
         self.auth_manager = auth_manager
-        self._shared_client = shared_client
-        self._owns_client = shared_client is None
-        self.client: Optional[httpx.AsyncClient] = shared_client
+        self._proxy_url = (proxy_url or "").strip() or None
+        effective_shared = None if self._proxy_url else shared_client
+        self._shared_client = effective_shared
+        self._owns_client = effective_shared is None
+        self.client: Optional[httpx.AsyncClient] = effective_shared
         self.encountered_429: bool = False
     
     async def _get_client(self, stream: bool = False) -> httpx.AsyncClient:
@@ -142,7 +148,12 @@ class KiroHttpClient:
                 timeout_config = httpx.Timeout(timeout=300.0)
                 logger.debug("Creating non-streaming HTTP client (timeout=300s)")
             
-            self.client = httpx.AsyncClient(timeout=timeout_config, follow_redirects=True)
+            client_kw = httpx_client_kwargs_for_proxy(
+                timeout=timeout_config,
+                proxy_url=self._proxy_url,
+                follow_redirects=True,
+            )
+            self.client = httpx.AsyncClient(**client_kw)
         return self.client
     
     async def close(self) -> None:

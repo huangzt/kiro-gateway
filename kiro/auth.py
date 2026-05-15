@@ -46,6 +46,7 @@ from kiro.config import (
     get_aws_sso_oidc_url,
 )
 from kiro.utils import get_machine_fingerprint
+from kiro.account_proxy import httpx_client_kwargs_for_proxy
 
 
 # Supported SQLite token keys (searched in priority order)
@@ -122,6 +123,7 @@ class KiroAuthManager:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         sqlite_db: Optional[str] = None,
+        http_proxy_url: Optional[str] = None,
     ):
         """
         Initializes the authentication manager.
@@ -135,13 +137,15 @@ class KiroAuthManager:
             client_secret: OAuth client secret (for AWS SSO OIDC, optional)
             sqlite_db: Path to kiro-cli SQLite database (optional)
                        Default location: ~/.local/share/kiro-cli/data.sqlite3
+            http_proxy_url: Optional outbound proxy for token refresh HTTP calls only.
         """
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
         self._sqlite_db = sqlite_db
-        
+        self._http_proxy_url: Optional[str] = http_proxy_url
+
         # AWS SSO OIDC specific fields
         self._client_id: Optional[str] = client_id
         self._client_secret: Optional[str] = client_secret
@@ -186,6 +190,20 @@ class KiroAuthManager:
     def creds_dir(self) -> Optional[Path]:
         """Directory containing the credentials file, if any."""
         return Path(self._creds_file).parent if self._creds_file else None
+
+    @property
+    def http_proxy_url(self) -> Optional[str]:
+        """Optional outbound HTTP(S)/SOCKS proxy for token refresh requests."""
+        return self._http_proxy_url
+
+    def set_http_proxy_url(self, url: Optional[str]) -> None:
+        """
+        Update outbound proxy for token refresh (in-memory).
+
+        Args:
+            url: Full proxy URL, or None/empty to clear.
+        """
+        self._http_proxy_url = url.strip() if url else None
 
     def _detect_auth_type(self) -> None:
         """
@@ -623,7 +641,8 @@ class KiroAuthManager:
             "User-Agent": f"KiroIDE-0.7.45-{self._fingerprint}",
         }
         
-        async with httpx.AsyncClient(timeout=30) as client:
+        client_kw = httpx_client_kwargs_for_proxy(timeout=30.0, proxy_url=self._http_proxy_url)
+        async with httpx.AsyncClient(**client_kw) as client:
             response = await client.post(self._refresh_url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
@@ -740,7 +759,8 @@ class KiroAuthManager:
         logger.debug(f"AWS SSO OIDC refresh request: url={url}, sso_region={sso_region}, "
                      f"api_region={self._region}, client_id={self._client_id[:8]}...")
         
-        async with httpx.AsyncClient(timeout=30) as client:
+        client_kw = httpx_client_kwargs_for_proxy(timeout=30.0, proxy_url=self._http_proxy_url)
+        async with httpx.AsyncClient(**client_kw) as client:
             response = await client.post(url, json=payload, headers=headers)
             
             # Log response details for debugging (especially on errors)

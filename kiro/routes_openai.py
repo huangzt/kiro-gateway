@@ -40,6 +40,7 @@ from kiro.config import (
     APP_VERSION,
     QUEUE_TIMEOUT,
     COOLDOWN_SECONDS,
+    LOG_CLIENT_HEADERS,
 )
 from kiro.models_openai import (
     OpenAIModel,
@@ -53,7 +54,7 @@ from kiro.account_pool import AccountPool, AccountSlot
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
-from kiro.utils import generate_conversation_id
+from kiro.utils import generate_conversation_id, format_request_headers_for_log, get_sticky_session_key_from_request
 
 # Import debug_logger
 try:
@@ -174,17 +175,25 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
+    if LOG_CLIENT_HEADERS:
+        logger.info(
+            "Incoming client request headers (redacted):\n{}",
+            format_request_headers_for_log(request.headers),
+        )
     
     # Resolve model name to internal ID for model control
     model_resolver: ModelResolver = request.app.state.model_resolver
     model_resolution = model_resolver.resolve(request_data.model)
     internal_model_id = model_resolution.internal_id
 
+    session_key = get_sticky_session_key_from_request(request)
+
     # Acquire account from pool with model control (queue mode - waits if all accounts busy)
     account_pool: AccountPool = request.app.state.account_pool
     slot: AccountSlot = None
     try:
-        slot = await account_pool.acquire_for_model(
+        slot = await account_pool.acquire_for_session(
+            session_key=session_key,
             model_id=internal_model_id,
             timeout=QUEUE_TIMEOUT,
         )
@@ -303,14 +312,15 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         url = f"{auth_manager.api_host}/generateAssistantResponse"
         logger.debug(f"Kiro API URL: {url}")
         
+        outbound_proxy = slot.proxy_url
         if request_data.stream:
             # Streaming mode: per-request client prevents orphaned connections
             # when network interface changes (VPN disconnect/reconnect)
-            http_client = KiroHttpClient(auth_manager, shared_client=None)
+            http_client = KiroHttpClient(auth_manager, shared_client=None, proxy_url=outbound_proxy)
         else:
             # Non-streaming mode: shared client for efficient connection reuse
             shared_client = request.app.state.http_client
-            http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
+            http_client = KiroHttpClient(auth_manager, shared_client=shared_client, proxy_url=outbound_proxy)
         try:
             # Make request to Kiro API (for both streaming and non-streaming modes)
             # Important: we wait for Kiro response BEFORE returning StreamingResponse,

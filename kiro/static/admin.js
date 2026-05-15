@@ -110,6 +110,12 @@ function getAccountStatus(a) {
   return 'active';
 }
 
+/** True when portal reports a Kiro Pro subscription (subscriptionTitle → quota.plan). */
+function isKiroProPlan(plan) {
+  if (!plan || typeof plan !== 'string') return false;
+  return /KIRO\s*PRO\b/i.test(plan.trim());
+}
+
 function renderDashboard(data) {
   document.getElementById('s-total').textContent     = data.total_accounts ?? '—';
   document.getElementById('s-active').textContent    = data.available ?? '—';
@@ -177,6 +183,7 @@ function updateDashboardFromStatus(data) {
 
 function renderAccountCard(a) {
   const status = getAccountStatus(a);
+  const isPro = isKiroProPlan(a.quota?.plan);
   const badges = {
     active   : ['badge-active',    'Active'],
     cooling  : ['badge-cooling',   'Cooling'],
@@ -242,6 +249,19 @@ function renderAccountCard(a) {
     cooldownHtml = `<div class="cooldown-info">⏳ 冷却剩余 ${m > 0 ? m + 'm ' : ''}${s}s</div>`;
   }
 
+  const proxyDisplay = a.proxy_url
+    ? `<div style="color:var(--text3);font-size:11px;margin-bottom:4px;">当前代理: ${escHtml(a.proxy_url)}</div>`
+    : '';
+  const proxyHtml = `
+      <div class="proxy-row" style="margin:10px 0;font-size:12px">
+        ${proxyDisplay}
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="text" class="input-proxy" id="proxy-input-${escAttr(a.name)}"
+            placeholder="http://127.0.0.1:7890（留空并保存可清除）" value="" style="flex:1;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text)">
+          <button type="button" class="btn btn-ghost" onclick="saveAccountProxy('${escAttr(a.name)}')">保存代理</button>
+        </div>
+      </div>`;
+
   // Action buttons
   const toggleDisabledBtn = a.is_disabled
     ? `<button class="btn btn-success" onclick="accountAction('${a.name}','enable')">✓ 启用</button>`
@@ -293,26 +313,27 @@ function renderAccountCard(a) {
   `;
 
   return `
-    <div class="account-card status-${status} ${a.is_active_on_host ? 'active-host' : ''}" id="card-${escAttr(a.name)}">
+    <div class="account-card status-${status} ${a.is_active_on_host ? 'active-host' : ''} ${isPro ? 'account-kiro-pro' : ''}" id="card-${escAttr(a.name)}">
       <div class="card-top" style="flex-direction: column; align-items: stretch; gap: 6px; margin-bottom: 14px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <div style="display:flex; align-items:center; gap:10px;">
             ${checkboxHtml}
             <div class="card-name" style="margin-bottom: 0">📁 ${escHtml(a.name)}</div>
           </div>
-          <div style="display: flex; align-items: center; gap: 6px;">
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end;">
             ${activeHostBadge}
             <span class="status-badge ${badgeCls}">${badgeTxt}</span>
           </div>
         </div>
         <div class="card-email" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${escHtml(a.email || '邮箱未知')}
-          ${a.quota?.plan ? ` · <span style="color:var(--text3); font-weight:500; font-size:11px">${escHtml(a.quota.plan)}</span>` : ''}
+          ${a.quota?.plan ? ` · <span class="plan-inline${isPro ? ' plan-kiro-pro' : ''}">${escHtml(a.quota.plan)}</span>` : ''}
           ${a.quota?.overage_enabled ? ` · <span class="overage-badge" title="已开启超支模式，配额用尽后仍可继续使用">💳 超支开启</span>` : ''}
         </div>
       </div>
       ${quotaHtml}
       ${cooldownHtml}
+      ${proxyHtml}
       <div class="card-stats">
         <div class="cs-item">
           <div class="cs-label">活跃请求</div>
@@ -413,6 +434,28 @@ async function exportSelectedAccountsZip() {
     loadDashboard();
   } catch (e) {
     showToast('网络错误', 'error');
+  }
+}
+
+async function saveAccountProxy(name) {
+  const inp = document.getElementById(`proxy-input-${name}`);
+  if (!inp) return;
+  const proxy_url = inp.value.trim();
+  try {
+    const r = await apiFetch(`/admin/accounts/${encodeURIComponent(name)}/proxy`, {
+      method: 'PATCH',
+      body: JSON.stringify({ proxy_url: proxy_url || '' }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(data.detail || `保存失败 (${r.status})`, 'error');
+      return;
+    }
+    inp.value = '';
+    showToast('代理已更新', 'success');
+    await loadDashboard();
+  } catch (e) {
+    showToast(String(e), 'error');
   }
 }
 

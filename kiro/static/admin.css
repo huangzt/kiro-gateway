@@ -235,6 +235,81 @@ body {
 .account-card.active-host { border-color: var(--green) !important; box-shadow: 0 0 15px rgba(16,185,129,.15); }
 .account-card.active-host::before { background: var(--green) !important; }
 
+/* Kiro Pro subscription — visually distinct */
+.account-card.account-kiro-pro {
+  border-color: rgba(251, 191, 36, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(251, 191, 36, 0.2),
+    0 4px 26px rgba(251, 191, 36, 0.12);
+  background:
+    linear-gradient(160deg, rgba(251, 191, 36, 0.14) 0%, rgba(251, 191, 36, 0.03) 40%, var(--card-bg) 58%);
+}
+.account-card.account-kiro-pro:hover {
+  border-color: rgba(252, 211, 77, 0.75);
+  box-shadow:
+    0 0 0 1px rgba(252, 211, 77, 0.35),
+    0 8px 36px rgba(251, 191, 36, 0.16);
+}
+/* Pro + 当前选用：不用绿色描边，避免与 Pro 金色主题冲突（免费卡仍用 .active-host 绿色） */
+.account-card.account-kiro-pro.active-host {
+  border-color: rgba(252, 211, 77, 0.9) !important;
+  box-shadow:
+    0 0 0 2px rgba(217, 119, 6, 0.45),
+    0 0 28px rgba(251, 191, 36, 0.28) !important;
+}
+
+/* Pro cards: do not reuse "free" green active chrome — top bar + badges match Pro palette */
+.account-card.account-kiro-pro.status-active::before {
+  background: linear-gradient(90deg, #d97706, #fbbf24, #f59e0b) !important;
+}
+.account-card.account-kiro-pro.status-cooling::before {
+  background: linear-gradient(90deg, #ca8a04, #fde047, #eab308) !important;
+}
+.account-card.account-kiro-pro.status-exhausted::before {
+  background: var(--red) !important;
+}
+.account-card.account-kiro-pro.status-disabled::before {
+  background: var(--text3) !important;
+}
+.account-card.account-kiro-pro.active-host::before {
+  background: linear-gradient(90deg, #ea580c, #fbbf24, #f59e0b) !important;
+}
+
+.account-card.account-kiro-pro .badge-active {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+}
+.account-card.account-kiro-pro .badge-cooling {
+  background: rgba(234, 179, 8, 0.2);
+  color: #fef9c3;
+  border: 1px solid rgba(253, 224, 71, 0.35);
+}
+
+.account-card.account-kiro-pro .progress-fill:not(.warning):not(.danger) {
+  background: linear-gradient(90deg, #b45309, #f59e0b, #fbbf24);
+}
+.account-card.account-kiro-pro .cs-val.text-active {
+  color: #fbbf24;
+}
+
+.account-card.account-kiro-pro .host-active-badge {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fef3c7;
+  border: 1px solid rgba(253, 224, 71, 0.5);
+}
+
+.plan-inline {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--text3);
+}
+.plan-inline.plan-kiro-pro {
+  color: #fcd34d;
+  font-weight: 700;
+  text-shadow: 0 0 18px rgba(251, 191, 36, 0.45);
+}
+
 /* Quota bar */
 .quota-section { margin-bottom: 14px; }
 .quota-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text3); margin-bottom: 6px; }

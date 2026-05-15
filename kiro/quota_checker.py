@@ -43,6 +43,8 @@ from typing import Optional
 import httpx
 from loguru import logger
 
+from kiro.account_proxy import httpx_client_kwargs_for_proxy
+
 
 # Kiro Web Portal API endpoint
 KIRO_PORTAL_URL = "https://app.kiro.dev/service/KiroWebPortalService/operation/GetUserUsageAndLimits"
@@ -179,7 +181,11 @@ def _parse_usage_response(data: dict) -> QuotaInfo:
     return info
 
 
-async def check_quota(access_token: str, provider: str = "BuilderId") -> QuotaInfo:
+async def check_quota(
+    access_token: str,
+    provider: str = "BuilderId",
+    proxy_url: Optional[str] = None,
+) -> QuotaInfo:
     """
     Query Kiro Web Portal API for account usage and limits.
 
@@ -189,6 +195,7 @@ async def check_quota(access_token: str, provider: str = "BuilderId") -> QuotaIn
     Args:
         access_token: Valid Kiro access token
         provider: Auth provider name (e.g., "BuilderId", "IAM_Identity_Center")
+        proxy_url: Optional per-account outbound proxy (same as Kiro API traffic).
 
     Returns:
         QuotaInfo with parsed usage data
@@ -217,7 +224,8 @@ async def check_quota(access_token: str, provider: str = "BuilderId") -> QuotaIn
         "Cookie": f"Idp={provider}; AccessToken={access_token}",
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    client_kw = httpx_client_kwargs_for_proxy(timeout=15.0, proxy_url=proxy_url)
+    async with httpx.AsyncClient(**client_kw) as client:
         response = await client.post(KIRO_PORTAL_URL, content=request_body, headers=headers)
 
     if response.status_code == 401:
