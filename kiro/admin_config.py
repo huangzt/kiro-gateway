@@ -81,6 +81,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "cooldown_seconds": None,
         "queue_timeout": None,
         "quota_check_interval": None,
+        "session_sticky_pro_models_only": None,
     },
     "timeout": {
         "first_token_timeout": None,

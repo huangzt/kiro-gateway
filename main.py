@@ -386,6 +386,9 @@ async def lifespan(app: FastAPI):
     _apply_yml_override("pool", "cooldown_seconds",     "COOLDOWN_SECONDS",          float)
     _apply_yml_override("pool", "queue_timeout",        "QUEUE_TIMEOUT",             float)
     _apply_yml_override("pool", "quota_check_interval", "QUOTA_CHECK_INTERVAL",      float)
+    _apply_yml_override(
+        "pool", "session_sticky_pro_models_only", "SESSION_STICKY_PRO_MODELS_ONLY", bool
+    )
     _apply_yml_override("timeout", "first_token_timeout",    "FIRST_TOKEN_TIMEOUT",      float)
     _apply_yml_override("timeout", "first_token_max_retries","FIRST_TOKEN_MAX_RETRIES",  int)
     _apply_yml_override("timeout", "streaming_read_timeout", "STREAMING_READ_TIMEOUT",   float)

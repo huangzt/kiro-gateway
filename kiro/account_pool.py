@@ -46,6 +46,7 @@ Usage:
 
 import asyncio
 import json
+import re
 import time
 import shutil
 from collections import OrderedDict, deque
@@ -59,6 +60,25 @@ from kiro.auth import KiroAuthManager
 from kiro.quota_checker import QuotaInfo, check_quota, QuotaCheckError
 from kiro.config import KIRO_HOST_CACHE_DIR, SESSION_STICKY_MAX_ENTRIES, SESSION_STICKY_TTL_SECONDS
 from kiro.account_proxy import load_proxy_url_from_account_dir, mask_proxy_url
+
+_KIRO_PRO_PLAN_RE = re.compile(r"KIRO\s*PRO\b", re.IGNORECASE)
+
+
+def _is_kiro_pro_plan_type(plan_type: str) -> bool:
+    """True when ``plan_type`` is a Kiro Pro subscription label from the portal."""
+    return bool(_KIRO_PRO_PLAN_RE.search(plan_type))
+
+
+def _pro_enabled_model_ids(controls: Dict[str, Dict[str, bool]]) -> frozenset[str]:
+    """Model IDs explicitly enabled (true) under any KIRO PRO plan in ``models.controls``."""
+    enabled: set[str] = set()
+    for plan_type, plan_controls in controls.items():
+        if not _is_kiro_pro_plan_type(plan_type):
+            continue
+        for model_id, is_on in plan_controls.items():
+            if is_on:
+                enabled.add(model_id)
+    return frozenset(enabled)
 
 
 def _account_name_sort_key(name: str) -> tuple[int, str]:
@@ -351,6 +371,45 @@ class AccountPool:
             old_k, _ = self._session_bindings.popitem(last=False)
             self._session_binding_mono.pop(old_k, None)
 
+    def _effective_session_key(
+        self,
+        session_key: Optional[str],
+        model_id: Optional[str],
+    ) -> Optional[str]:
+        """
+        Decide whether ``session_key`` should pin an account for this request.
+
+        When ``SESSION_STICKY_PRO_MODELS_ONLY`` is true (default), stickiness applies only
+        if ``model_id`` is enabled for a KIRO PRO plan in ``models.controls``. Otherwise
+        any non-empty session key is used.
+        """
+        from kiro.config import SESSION_STICKY_PRO_MODELS_ONLY
+
+        sk = (session_key or "").strip()
+        if not sk:
+            return None
+        if not SESSION_STICKY_PRO_MODELS_ONLY:
+            return sk
+        if not model_id:
+            logger.debug("Session stickiness skipped: no model_id (Pro-models-only mode)")
+            return None
+        if not self._admin_config:
+            logger.debug("Session stickiness skipped: no admin config (Pro-models-only mode)")
+            return None
+        pro_models = _pro_enabled_model_ids(self._admin_config.get_model_controls())
+        if not pro_models:
+            logger.debug(
+                "Session stickiness skipped: no enabled models under KIRO PRO in model controls"
+            )
+            return None
+        if model_id in pro_models:
+            return sk
+        logger.debug(
+            f"Session stickiness skipped for model '{model_id}' "
+            "(not enabled for KIRO PRO in model controls)"
+        )
+        return None
+
     async def acquire_for_session(
         self,
         session_key: Optional[str],
@@ -360,12 +419,14 @@ class AccountPool:
         """
         Acquire a slot, optionally pinning follow-up requests to one account.
 
-        When ``session_key`` is non-empty and a binding exists or is created,
+        When an effective session key is non-empty and a binding exists or is created,
         subsequent calls with the same key reuse the same account when possible.
+        With ``SESSION_STICKY_PRO_MODELS_ONLY`` (default), only models listed as enabled
+        for KIRO PRO in ``models.controls`` participate in stickiness.
 
         Args:
             session_key: Client-supplied stable id (e.g. from ``X-Kiro-Session-Id``).
-            model_id: Optional model id for plan-based filtering.
+            model_id: Resolved internal model id (used for Pro-only stickiness gate).
             timeout: Max seconds to wait for a suitable slot.
 
         Returns:
@@ -374,7 +435,7 @@ class AccountPool:
         Raises:
             asyncio.TimeoutError: If no slot becomes available (same as acquire_for_model).
         """
-        sk = (session_key or "").strip()
+        sk = self._effective_session_key(session_key, model_id)
         if not sk:
             return await self.acquire_for_model(model_id=model_id, timeout=timeout)
 

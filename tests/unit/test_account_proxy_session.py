@@ -65,8 +65,17 @@ def test_httpx_client_kwargs_with_proxy_sets_trust_env_false() -> None:
     assert "proxy" in kw or "proxies" in kw
 
 
+class _FakeAdminConfig:
+    def __init__(self, controls: dict) -> None:
+        self._controls = controls
+
+    def get_model_controls(self) -> dict:
+        return self._controls
+
+
 @pytest.mark.asyncio
-async def test_acquire_for_session_reuses_account_after_release() -> None:
+async def test_acquire_for_session_reuses_account_after_release(monkeypatch) -> None:
+    monkeypatch.setattr("kiro.config.SESSION_STICKY_PRO_MODELS_ONLY", False)
     slots = [
         AccountSlot(name="x", auth_manager=_mock_auth("x")),
         AccountSlot(name="y", auth_manager=_mock_auth("y")),
@@ -79,6 +88,52 @@ async def test_acquire_for_session_reuses_account_after_release() -> None:
     second = await pool.acquire_for_session(session_id, model_id=None, timeout=2.0)
     assert second.name == name1
     await pool.release(second)
+
+
+@pytest.mark.asyncio
+async def test_acquire_for_session_pro_model_only_sticky(monkeypatch) -> None:
+    """Default mode: stickiness only for models enabled under KIRO PRO in controls."""
+    monkeypatch.setattr("kiro.config.SESSION_STICKY_PRO_MODELS_ONLY", True)
+    slots = [
+        AccountSlot(name="pro-slot", auth_manager=_mock_auth("pro-slot")),
+        AccountSlot(name="other", auth_manager=_mock_auth("other")),
+    ]
+    pool = AccountPool(slots, quota_check_interval=0)
+    pool._admin_config = _FakeAdminConfig(
+        {
+            "KIRO FREE": {"claude-sonnet-4.5": True},
+            "KIRO PRO": {"claude-opus-4.6": True},
+        }
+    )
+    session_id = "claude-session"
+
+    first = await pool.acquire_for_session(
+        session_id, model_id="claude-opus-4.6", timeout=2.0
+    )
+    pro_name = first.name
+    await pool.release(first)
+
+    second = await pool.acquire_for_session(
+        session_id, model_id="claude-opus-4.6", timeout=2.0
+    )
+    assert second.name == pro_name
+    await pool.release(second)
+
+
+def test_effective_session_key_pro_models_only(monkeypatch) -> None:
+    monkeypatch.setattr("kiro.config.SESSION_STICKY_PRO_MODELS_ONLY", True)
+    pool = AccountPool([], quota_check_interval=0)
+    pool._admin_config = _FakeAdminConfig(
+        {"KIRO PRO": {"claude-opus-4.6": True}, "KIRO FREE": {"claude-sonnet-4.5": True}}
+    )
+    assert pool._effective_session_key("sess-1", "claude-opus-4.6") == "sess-1"
+    assert pool._effective_session_key("sess-1", "claude-sonnet-4.5") is None
+
+
+def test_effective_session_key_all_models_when_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("kiro.config.SESSION_STICKY_PRO_MODELS_ONLY", False)
+    pool = AccountPool([], quota_check_interval=0)
+    assert pool._effective_session_key("sess-1", "claude-sonnet-4.5") == "sess-1"
 
 
 @pytest.mark.asyncio

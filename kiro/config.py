@@ -238,6 +238,11 @@ CLAUDE_CODE_SESSION_HEADER: str = os.getenv("CLAUDE_CODE_SESSION_HEADER", "X-Cla
 SESSION_STICKY_DISCOVER_HEADERS: bool = os.getenv(
     "SESSION_STICKY_DISCOVER_HEADERS", "true"
 ).lower() in ("1", "true", "yes")
+# When true (default), session stickiness applies only to model IDs enabled for KIRO PRO in
+# gateway.yml ``models.controls``. When false, any model may use session binding.
+SESSION_STICKY_PRO_MODELS_ONLY: bool = os.getenv(
+    "SESSION_STICKY_PRO_MODELS_ONLY", "true"
+).lower() in ("1", "true", "yes")
 
 # When true, log all incoming HTTP headers (values redacted for secrets) at INFO for
 # POST /v1/chat/completions and POST /v1/messages — useful to inspect clients (e.g. Claude Code).

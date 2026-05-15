@@ -1287,6 +1287,9 @@ async def get_config(request: Request) -> JSONResponse:
             "cooldown_seconds": getattr(cfg_module, "COOLDOWN_SECONDS", 300),
             "queue_timeout": getattr(cfg_module, "QUEUE_TIMEOUT", 300),
             "quota_check_interval": getattr(cfg_module, "QUOTA_CHECK_INTERVAL", 300),
+            "session_sticky_pro_models_only": getattr(
+                cfg_module, "SESSION_STICKY_PRO_MODELS_ONLY", True
+            ),
         },
         "timeout": {
             "first_token_timeout": getattr(cfg_module, "FIRST_TOKEN_TIMEOUT", 15),
@@ -1370,7 +1373,12 @@ async def update_config(request: Request) -> JSONResponse:
 
     # Whitelist of allowed hot-reload sections/keys
     _ALLOWED_KEYS: Dict[str, set] = {
-        "pool": {"cooldown_seconds", "queue_timeout", "quota_check_interval"},
+        "pool": {
+            "cooldown_seconds",
+            "queue_timeout",
+            "quota_check_interval",
+            "session_sticky_pro_models_only",
+        },
         "timeout": {"first_token_timeout", "first_token_max_retries", "streaming_read_timeout"},
         "reasoning": {"fake_reasoning", "fake_reasoning_max_tokens", "fake_reasoning_handling"},
         "logging": {"log_level", "debug_mode", "log_history_size"},
@@ -1433,6 +1441,7 @@ async def update_config(request: Request) -> JSONResponse:
         "cooldown_seconds": (float, "COOLDOWN_SECONDS"),
         "queue_timeout": (float, "QUEUE_TIMEOUT"),
         "quota_check_interval": (float, "QUOTA_CHECK_INTERVAL"),
+        "session_sticky_pro_models_only": (bool, "SESSION_STICKY_PRO_MODELS_ONLY"),
         "first_token_timeout": (int, "FIRST_TOKEN_TIMEOUT"),
         "first_token_max_retries": (int, "FIRST_TOKEN_MAX_RETRIES"),
         "streaming_read_timeout": (float, "STREAMING_READ_TIMEOUT"),
